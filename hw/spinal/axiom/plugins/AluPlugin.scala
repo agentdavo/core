@@ -35,6 +35,19 @@ class AluPlugin extends AxiomPlugin {
   val FN      = Payload(UInt(5 bits))
   val USE_IMM = Payload(Bool())
 
+  /** Constant formation, also resolved in decode.
+    *
+    * MOVZ, MOVN and ADDPC read no register at all, and MOVK reads one only to
+    * keep the lanes it is not writing. Forming the constant in execute put a
+    * four-way opcode multiplexer on top of the function-wide result
+    * multiplexer, in series, on the path every arithmetic instruction takes.
+    * Doing it in decode leaves execute one select between the ALU and a
+    * constant that is already built.
+    */
+  val SEL_CONST   = Payload(Bool())
+  val CONST_VALUE = Payload(Bits(AxiomParam.XLEN bits))
+  val IS_MOVK     = Payload(Bool())
+
   /** A multiply, which does not.
     *
     * A 64 by 64 multiply is sixteen DSP blocks and a four-level adder tree, and
@@ -128,6 +141,27 @@ class AluPlugin extends AxiomPlugin {
       }
       decode(FN) := fn
       decode(USE_IMM) := useImm
+
+      // The lane, times sixteen. MOVK keeps the mask out of the payloads: the
+      // lane index is two bits of the instruction, which execute already has,
+      // so rebuilding the mask there is one level of logic and saves carrying
+      // sixty-four bits through two stages.
+      val movAmount = (instr(17 downto 16) ## B(0, 4 bits)).asUInt
+      val movLane = (B(0, (xlen - 16) bits) ## instr(15 downto 0)).asUInt
+      val movShifted = (movLane |<< movAmount).asBits
+
+      val isMovk = opcode === B(Isa.MOVK, 6 bits)
+      decode(IS_MOVK) := isMovk
+      decode(SEL_CONST) := opcode === B(Isa.MOVZ, 6 bits) || opcode === B(Isa.MOVN, 6 bits) ||
+        isMovk || opcode === B(Isa.ADDPC, 6 bits)
+
+      val constValue = Bits(xlen bits)
+      constValue := movShifted
+      when(opcode === B(Isa.MOVN, 6 bits)) { constValue := ~movShifted }
+      when(opcode === B(Isa.ADDPC, 6 bits)) {
+        constValue := (decode(Global.PC) + decode(Global.IMM).asUInt).asBits
+      }
+      decode(CONST_VALUE) := constValue
     }
 
     val node = ctrl(Stages.EXECUTE)
@@ -241,22 +275,21 @@ class AluPlugin extends AxiomPlugin {
       is(Isa.Fn.MAXU)  { aluResult := Mux(compare.lessUnsigned, b, a) }
     }
 
-    // ---- constant formation ---------------------------------------------
-    val movAmount = (instr(17 downto 16) ## B(0, 4 bits)).asUInt // the lane, times sixteen
-    val movLane = (B(0, (xlen - 16) bits) ## instr(15 downto 0)).asUInt
-    val movShifted = (movLane |<< movAmount).asBits
-    val movMask = ((B(0, (xlen - 16) bits) ## B(0xffff, 16 bits)).asUInt |<< movAmount).asBits
+    // ---- constant formation, finished ------------------------------------
+    //
+    // MOVK is the only instruction that reads and writes rd, which is what
+    // lets a 64-bit constant be built one lane at a time. It is also the only
+    // part of constant formation that needs a register, so it is the only part
+    // left here: the lane it writes is already in place in CONST_VALUE, and
+    // what remains is to keep the three lanes it does not.
+    val movMask = ((B(0, (xlen - 16) bits) ## B(0xffff, 16 bits)).asUInt |<<
+      (instr(17 downto 16) ## B(0, 4 bits)).asUInt).asBits
 
-    val out = Bits(xlen bits)
-    out := aluResult
-    switch(opcode) {
-      is(B(Isa.MOVZ, 6 bits)) { out := movShifted }
-      is(B(Isa.MOVN, 6 bits)) { out := ~movShifted }
-      // MOVK is the only instruction that reads and writes rd, which is what
-      // lets a 64-bit constant be built one lane at a time.
-      is(B(Isa.MOVK, 6 bits)) { out := (node(Global.RS_D) & ~movMask) | (movShifted & movMask) }
-      is(B(Isa.ADDPC, 6 bits)) { out := (node(Global.PC) + imm.asUInt).asBits }
-    }
+    val constant = Bits(xlen bits)
+    constant := node(CONST_VALUE)
+    when(node(IS_MOVK)) { constant := (node(Global.RS_D) & ~movMask) | node(CONST_VALUE) }
+
+    val out = Mux(node(SEL_CONST), constant, aluResult)
 
     node(RESULT) := out
 
