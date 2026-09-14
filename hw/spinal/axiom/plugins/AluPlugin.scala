@@ -35,6 +35,23 @@ class AluPlugin extends AxiomPlugin {
   val FN      = Payload(UInt(5 bits))
   val USE_IMM = Payload(Bool())
 
+  /** The second operand, selected in the read stage.
+    *
+    * Selecting it in execute meant the adder's input arrived through a
+    * multiplexer whose one-bit control had to reach all sixty-four lanes. On
+    * an ECP5 that control net measured 1.9 ns of routing on its own and the
+    * net from the multiplexer to the carry chain another 2.1: four of a twenty
+    * nanosecond cycle, spent getting a decoded bit and an operand to the same
+    * place.
+    *
+    * The read stage already has a sixty-four bit multiplexer for forwarding
+    * and the immediate sitting next to it, so it selects there instead and
+    * execute reads an operand straight out of a register. Register rm still
+    * travels separately because the multiplier and a store pair want it
+    * unmodified.
+    */
+  val SRC_B = Payload(Bits(AxiomParam.XLEN bits))
+
   /** Constant formation, also resolved in decode.
     *
     * MOVZ, MOVN and ADDPC read no register at all, and MOVK reads one only to
@@ -164,6 +181,15 @@ class AluPlugin extends AxiomPlugin {
       decode(CONST_VALUE) := constValue
     }
 
+    // ---- read: finish the second operand --------------------------------
+    val operands = new Area {
+      val read = ctrl(Stages.READ)
+      // down, not the bare node: the register file drives RS_M onto this
+      // node's downstream side in the same stage, and the bare form would read
+      // the upstream value from before the read happened.
+      read.down(SRC_B) := Mux(read.down(USE_IMM), read.down(Global.IMM), read.down(Global.RS_M))
+    }
+
     val node = ctrl(Stages.EXECUTE)
 
     val instr  = node(Global.INSTRUCTION)
@@ -173,7 +199,7 @@ class AluPlugin extends AxiomPlugin {
     def opIs(value: Int): Bool = opcode === B(value, 6 bits)
 
     val fn = node(FN)
-    val srcB = Mux(node(USE_IMM), imm, node(Global.RS_M))
+    val srcB = node(SRC_B)
 
     // ---- the datapath ---------------------------------------------------
     val a = node(Global.RS_N)

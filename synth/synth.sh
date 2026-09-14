@@ -19,6 +19,7 @@ FREQ=100
 OUT_OF_CONTEXT=1
 LPF=""
 SEED=1
+SPEED=""
 ABC9=0
 NODSP=0
 OUTDIR=""
@@ -36,6 +37,7 @@ usage: synth/synth.sh [options]
   --with-pins         insert IO buffers and bind to pins; needs --lpf
   --lpf FILE          pin constraint file, implies --with-pins
   --seed N            place and route seed                 (default 1)
+  --speed N           ECP5 speed grade, 6 | 7 | 8      (default: the part's)
   --abc9              use the abc9 technology mapping flow
   --nodsp             keep multipliers in fabric instead of DSP blocks
   --synth-only        stop after yosys
@@ -58,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --with-pins) OUT_OF_CONTEXT=0; shift ;;
     --lpf) LPF="$2"; OUT_OF_CONTEXT=0; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;;
+    --speed) SPEED="$2"; shift 2 ;;
     --abc9) ABC9=1; shift ;;
     --nodsp) NODSP=1; shift ;;
     --synth-only) PNR=0; shift ;;
@@ -98,6 +101,12 @@ PNR_FLAGS=(--json "${OUTDIR}/${TOP}.json" --top "${TOP}" "--${DEVICE}"
            --package "${PACKAGE}" --freq "${FREQ}" --seed "${SEED}"
            --report "${OUTDIR}/report.json" --textcfg "${OUTDIR}/${TOP}.config"
            --timing-allow-fail)
+
+# The speed grade is a property of the part you actually buy, not of the
+# design, so it is off by default: comparing two revisions of the RTL means
+# holding it fixed. It is here because the difference between a -6 and an -8 is
+# real money and worth knowing before promising a frequency.
+[[ -n "$SPEED" ]] && PNR_FLAGS+=(--speed "$SPEED")
 
 if [[ $OUT_OF_CONTEXT -eq 1 ]]; then
   PNR_FLAGS+=(--out-of-context)
