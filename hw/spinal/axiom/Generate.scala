@@ -27,6 +27,25 @@ object GenerateAxiomCore extends App {
   println("Wrote generated/AxiomCore.v")
 }
 
+/** The core as it would go on a chip: no debug read port on the register file,
+  * and the narrow bypass network. Both are measured choices rather than
+  * defaults, which is why they have their own target.
+  */
+object GenerateAxiomCoreLean extends App {
+  AxiomSpinalConfig().generateVerilog(
+    new AxiomCore(forwardBase = false, withDebugRegFilePort = false)
+      .setDefinitionName("AxiomCoreLean"))
+  println("Wrote generated/AxiomCoreLean.v")
+}
+
+/** The same, keeping base forwarding, to separate the two effects. */
+object GenerateAxiomCoreNoDebug extends App {
+  AxiomSpinalConfig().generateVerilog(
+    new AxiomCore(withDebugRegFilePort = false)
+      .setDefinitionName("AxiomCoreNoDebug"))
+  println("Wrote generated/AxiomCoreNoDebug.v")
+}
+
 object GenerateAxiomAll extends App {
   AxiomSpinalConfig().generateVerilog(new AxiomSoc())
   AxiomSpinalConfig().generateVerilog(new AxiomCore())

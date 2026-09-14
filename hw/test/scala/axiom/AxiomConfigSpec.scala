@@ -49,6 +49,36 @@ class AxiomConfigSpec extends AxiomSpec {
     assert(without.word(DataWord) == 0L, "the rejected atomic must not have touched memory")
   }
 
+  test("a core that waits for base updates instead of forwarding them agrees") {
+    // Every addressing mode that writes a base, with a consumer of that base
+    // immediately behind it, which is exactly the pairing the forwarding
+    // network used to cover and the interlock now has to.
+    val program = Assembler() { a =>
+      import a._
+      li(s0, DataByte)
+      li(a0, 0x11)
+      li(a1, 0x22)
+      std(a0, s0, 8, Isa.Mode.PRE)   // s0 += 8, then store
+      addi(a2, s0, 0)                // reads the updated base at distance one
+      std(a1, s0, 8, Isa.Mode.POST)  // store, then s0 += 8
+      addi(a3, s0, 0)
+      stp(a0, a1, s0, -16, Isa.Mode.PRE)
+      addi(a4, s0, 0)
+      ldp(t0, t1, s0, 16, Isa.Mode.POST)
+      addi(a5, s0, 0)
+      halt()
+    }
+
+    val forwarded = AxiomSim.run(program)
+    val waited = AxiomSim.run(program, design = AxiomSim.socWithoutBaseForward)
+
+    assert(!forwarded.trapped && !waited.trapped, s"$forwarded / $waited")
+    assert(forwarded.regs.sameElements(waited.regs),
+      s"the two cores must agree on every register:%nforwarded $forwarded%nwaited    $waited".stripMargin)
+    assert(waited.cycles >= forwarded.cycles,
+      "waiting cannot be faster than forwarding")
+  }
+
   test("the reset vector is configurable") {
     val base = AxiomSim.AltResetVector
     val program = Assembler(base) { a =>

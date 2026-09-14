@@ -54,13 +54,39 @@ object AxiomParam {
     */
   val FORWARD_LATE_FROM_WRITEBACK = Database.blocking[Boolean]()
 
+  /** Whether an updated base register may be forwarded, or only waited for.
+    *
+    * Pre-index, post-index and the pair forms write a base register as well as
+    * a destination, so every operand needs a second address comparator and a
+    * second multiplexer input against it. That doubles the width of the bypass
+    * network, which on an FPGA is the expensive part: the critical path
+    * measures around sixty per cent routing, and the bypass network is what
+    * spreads the design out.
+    *
+    * Turning it off leaves the base update to reach the register file before a
+    * consumer can read it, which the interlock already knows how to wait for.
+    * What that costs depends on how soon the code re-uses its base pointer, so
+    * it is a parameter and measured rather than argued about.
+    */
+  val FORWARD_BASE = Database.blocking[Boolean]()
+
+  /** A combinational read port on the register file for the test bench.
+    *
+    * It is a whole extra copy of every RAM bank and nothing on a real chip
+    * needs it, so a synthesis build turns it off and reads registers the way
+    * hardware does.
+    */
+  val WITH_DEBUG_REGFILE_PORT = Database.blocking[Boolean]()
+
   /** Fill a database with the Base profile defaults. */
   def base(
       resetVector: BigInt = 0,
       memWords: Int = 4096,
       withMultiplier: Boolean = true,
       withAtomics: Boolean = true,
-      forwardLateFromWriteback: Boolean = true
+      forwardLateFromWriteback: Boolean = true,
+      forwardBase: Boolean = true,
+      withDebugRegFilePort: Boolean = true
   ): Unit = {
     XLEN.set(Isa.XLEN)
     PC_WIDTH.set(Isa.XLEN)
@@ -73,6 +99,8 @@ object AxiomParam {
     WITH_MULTIPLIER.set(withMultiplier)
     WITH_ATOMICS.set(withAtomics)
     FORWARD_LATE_FROM_WRITEBACK.set(forwardLateFromWriteback)
+    FORWARD_BASE.set(forwardBase)
+    WITH_DEBUG_REGFILE_PORT.set(withDebugRegFilePort)
   }
 }
 

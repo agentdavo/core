@@ -48,6 +48,8 @@ class AxiomCore(
     val withMultiplier: Boolean = true,
     val withAtomics: Boolean = true,
     val forwardLateFromWriteback: Boolean = true,
+    val forwardBase: Boolean = true,
+    val withDebugRegFilePort: Boolean = true,
     val plugins: Seq[Hostable] = AxiomProfile.bare
 ) extends Component {
 
@@ -58,7 +60,8 @@ class AxiomCore(
   val host = database on {
     // The memory size only matters to a memory plugin, and there is not one
     // here, but the key is blocking so it still has to be set.
-    AxiomParam.base(resetVector, 4096, withMultiplier, withAtomics, forwardLateFromWriteback)
+    AxiomParam.base(resetVector, 4096, withMultiplier, withAtomics, forwardLateFromWriteback,
+      forwardBase, withDebugRegFilePort)
     val created = new PluginHost()
     created.addService(new InterfaceService(io))
     created.addService(new BusInterfaceService(io.ibus, io.dbus))
@@ -180,6 +183,8 @@ class AxiomSoc(
     val withMultiplier: Boolean = true,
     val withAtomics: Boolean = true,
     val forwardLateFromWriteback: Boolean = true,
+    val forwardBase: Boolean = true,
+    val withDebugRegFilePort: Boolean = true,
     val plugins: Seq[Hostable] = AxiomProfile.base
 ) extends Component {
 
@@ -190,7 +195,8 @@ class AxiomSoc(
   val database = new Database
 
   val host = database on {
-    AxiomParam.base(resetVector, memWords, withMultiplier, withAtomics, forwardLateFromWriteback)
+    AxiomParam.base(resetVector, memWords, withMultiplier, withAtomics, forwardLateFromWriteback,
+      forwardBase, withDebugRegFilePort)
     val created = new PluginHost()
     // Registering a holder, not the component, lets a plugin reach the
     // interface without the interface having to know which plugins exist.

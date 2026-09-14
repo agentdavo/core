@@ -69,8 +69,10 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       * cheap to keep in flip-flops.
       */
     val storage = new Area {
-      val PortRn = 0; val PortRm = 1; val PortRd = 2; val PortDebug = 3
-      val readPorts = 4
+      val withDebug = AxiomParam.WITH_DEBUG_REGFILE_PORT.get
+      val PortRn = 0; val PortRm = 1; val PortRd = 2
+      val PortDebug = 3
+      val readPorts = if (withDebug) 4 else 3
 
       // An asynchronous read alongside a synchronous write is write-first in
       // the generated Verilog and read-first in an ECP5 distributed RAM, which
@@ -138,6 +140,7 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     }
 
     val forwardLate = AxiomParam.FORWARD_LATE_FROM_WRITEBACK.get
+    val forwardBase = AxiomParam.FORWARD_BASE.get
 
     // The commit multiplexer always sees every source; the forwarding copy may
     // not, because a writeback-stage source drags a block RAM read into the
@@ -184,11 +187,11 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     class ReadPort(port: Int, address: UInt) extends Area {
       val value = Bits(xlen bits)
       value := storage.read(port, address)
-      when(wbHasBase && wb.down(Global.RN_ADDR) === address) { value := wb.down(Global.BASE_VALUE) }
+      if (forwardBase) when(wbHasBase && wb.down(Global.RN_ADDR) === address) { value := wb.down(Global.BASE_VALUE) }
       when(wbHasRd && wb.down(Global.RD_ADDR) === address) { value := wbResult }
-      when(memWritesBase && me.down(Global.RN_ADDR) === address) { value := me.down(Global.BASE_VALUE) }
+      if (forwardBase) when(memWritesBase && me.down(Global.RN_ADDR) === address) { value := me.down(Global.BASE_VALUE) }
       when(memWritesRd && me.down(Global.RD_ADDR) === address) { value := memResult }
-      when(exWritesBase && ex.down(Global.RN_ADDR) === address) { value := ex.down(Global.BASE_VALUE) }
+      if (forwardBase) when(exWritesBase && ex.down(Global.RN_ADDR) === address) { value := ex.down(Global.BASE_VALUE) }
       when(exWritesRd && ex.down(Global.RD_ADDR) === address) { value := exResult }
       when(address === 0) { value := B(0, xlen bits) }
     }
@@ -213,7 +216,14 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       (rd.down(Global.READS_RM) && rd.down(Global.RM_ADDR) === destination) ||
       (rd.down(Global.READS_RD) && rd.down(Global.RD_ADDR) === destination)
 
-    def blockedBy(node: CtrlLink, upTo: Int): Bool = {
+    /** @param owesBase a base write this instruction has not performed yet.
+      *        Read from the upstream side in memory and writeback, because a
+      *        pair defers its base update to its second pass and the
+      *        downstream side says "not this one" on the first. The upstream
+      *        side is held across both passes, so it says what the instruction
+      *        as a whole still owes, which is the question being asked.
+      */
+    def blockedBy(node: CtrlLink, upTo: Int, owesBase: Bool): Bool = {
       val destination = node.down(Global.RD_ADDR)
       val primary = unavailableAt(node, upTo) && node.down(Global.WRITES_RD) &&
         destination =/= 0 && consumerNeeds(destination)
@@ -224,7 +234,14 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       val second = node.down(Global.WRITES_RM) && node.down(Global.RM_ADDR) =/= 0 &&
         consumerNeeds(node.down(Global.RM_ADDR))
 
-      node.isValid && (primary || second)
+      // With base forwarding off, an updated base register is the same shape
+      // of promise: named, but not readable until it commits.
+      val base =
+        if (forwardBase) False
+        else owesBase && node.down(Global.RN_ADDR) =/= 0 &&
+          consumerNeeds(node.down(Global.RN_ADDR))
+
+      node.isValid && (primary || second || base)
     }
 
     // Guarded on the up nodes rather than the down ones, because halting
@@ -235,15 +252,19 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     // memory has not returned its data yet, and with writeback forwarding of
     // those turned off a consumer has to wait for the producer to commit.
     val blocked =
-      blockedBy(ex, Stages.EXECUTE) || blockedBy(me, Stages.MEMORY) ||
-        blockedBy(wb, forwardFromWriteback)
+      blockedBy(ex, Stages.EXECUTE, ex.down(Global.WRITES_BASE)) ||
+        blockedBy(me, Stages.MEMORY, me.up(Global.WRITES_BASE)) ||
+        blockedBy(wb, forwardFromWriteback, wb.up(Global.WRITES_BASE))
     val interlock = rd.isValid && blocked
 
     rd.haltWhen(interlock)
 
     // ---- debug -------------------------------------------------------------
     // A combinational peek at the committed file, for simulation and bring-up.
+    // It is a whole extra copy of every bank, so a build that is not going to
+    // be simulated leaves it out and ties the port off.
     val io = host[InterfaceService].io
-    io.dbgRegData := storage.read(storage.PortDebug, io.dbgRegAddr)
+    if (storage.withDebug) io.dbgRegData := storage.read(storage.PortDebug, io.dbgRegAddr)
+    else io.dbgRegData := B(0, xlen bits)
   }
 }

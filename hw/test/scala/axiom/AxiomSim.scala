@@ -61,6 +61,17 @@ object AxiomSim {
     config.workspaceName("AxiomSocNoAtomic")
       .compile(new AxiomSoc(memWords = MemWords, withAtomics = false))
 
+  /** Base register updates waited for rather than forwarded.
+    *
+    * The same programs must produce the same answers with a narrower bypass
+    * network, only taking more cycles, so this is the design the correctness
+    * suite runs against to prove the interlock covers what the forwarding
+    * stopped covering.
+    */
+  lazy val socWithoutBaseForward: SimCompiled[AxiomSoc] =
+    config.workspaceName("AxiomSocNoBaseFwd")
+      .compile(new AxiomSoc(memWords = MemWords, forwardBase = false))
+
   /** Reset vector at 0x400 rather than 0. */
   val AltResetVector: Int = 0x400
   lazy val socAltReset: SimCompiled[AxiomSoc] =
