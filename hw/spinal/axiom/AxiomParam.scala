@@ -83,6 +83,19 @@ object AxiomParam {
     */
   val MEMORY_STALL = Database.blocking[Int]()
 
+  /** Cycles the backing memory takes to answer, and the minimum gap between
+    * commands. One is a memory that answers next cycle; anything larger is
+    * what makes a cache worth having.
+    */
+  val MEMORY_LATENCY = Database.blocking[Int]()
+
+  /** Cache geometry. Zero bytes builds no cache and passes the port straight
+    * through, which is how the two caches are measured one at a time.
+    */
+  val ICACHE_BYTES = Database.blocking[Int]()
+  val DCACHE_BYTES = Database.blocking[Int]()
+  val CACHE_LINE_BYTES = Database.blocking[Int]()
+
   /** A combinational read port on the register file for the test bench.
     *
     * It is a whole extra copy of every RAM bank and nothing on a real chip
@@ -100,7 +113,11 @@ object AxiomParam {
       forwardLateFromWriteback: Boolean = true,
       forwardBase: Boolean = true,
       withDebugRegFilePort: Boolean = true,
-      memoryStall: Int = 0
+      memoryStall: Int = 0,
+      memoryLatency: Int = 1,
+      icacheBytes: Int = 4096,
+      dcacheBytes: Int = 4096,
+      cacheLineBytes: Int = 32
   ): Unit = {
     XLEN.set(Isa.XLEN)
     PC_WIDTH.set(Isa.XLEN)
@@ -116,6 +133,10 @@ object AxiomParam {
     FORWARD_BASE.set(forwardBase)
     WITH_DEBUG_REGFILE_PORT.set(withDebugRegFilePort)
     MEMORY_STALL.set(memoryStall)
+    MEMORY_LATENCY.set(memoryLatency)
+    ICACHE_BYTES.set(icacheBytes)
+    DCACHE_BYTES.set(dcacheBytes)
+    CACHE_LINE_BYTES.set(cacheLineBytes)
   }
 }
 

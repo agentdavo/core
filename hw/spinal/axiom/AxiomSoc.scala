@@ -38,6 +38,12 @@ object AxiomProfile {
     * system or for synthesising the core on its own.
     */
   def bare: Seq[Hostable] = core :+ new ExternalBusPlugin
+
+  /** The Base profile with first level caches in front of a memory slow enough
+    * to be worth caching. The core cannot tell: it asks for a port and gets
+    * one, which is the whole point of the memory being a service.
+    */
+  def cached: Seq[Hostable] = core ++ Seq(new CachePlugin, new BackingMemoryPlugin)
 }
 
 /** A bare Axiom-64 core: everything but the memory, with the two buses
@@ -51,6 +57,10 @@ class AxiomCore(
     val forwardBase: Boolean = true,
     val withDebugRegFilePort: Boolean = true,
     val memoryStall: Int = 0,
+    val memoryLatency: Int = 1,
+    val icacheBytes: Int = 4096,
+    val dcacheBytes: Int = 4096,
+    val cacheLineBytes: Int = 32,
     val plugins: Seq[Hostable] = AxiomProfile.bare
 ) extends Component {
 
@@ -62,7 +72,8 @@ class AxiomCore(
     // The memory size only matters to a memory plugin, and there is not one
     // here, but the key is blocking so it still has to be set.
     AxiomParam.base(resetVector, 4096, withMultiplier, withAtomics, forwardLateFromWriteback,
-      forwardBase, withDebugRegFilePort, memoryStall)
+      forwardBase, withDebugRegFilePort, memoryStall, memoryLatency,
+      icacheBytes, dcacheBytes, cacheLineBytes)
     val created = new PluginHost()
     created.addService(new InterfaceService(io))
     created.addService(new BusInterfaceService(io.ibus, io.dbus))
@@ -187,6 +198,10 @@ class AxiomSoc(
     val forwardBase: Boolean = true,
     val withDebugRegFilePort: Boolean = true,
     val memoryStall: Int = 0,
+    val memoryLatency: Int = 1,
+    val icacheBytes: Int = 4096,
+    val dcacheBytes: Int = 4096,
+    val cacheLineBytes: Int = 32,
     val plugins: Seq[Hostable] = AxiomProfile.base
 ) extends Component {
 
@@ -198,7 +213,8 @@ class AxiomSoc(
 
   val host = database on {
     AxiomParam.base(resetVector, memWords, withMultiplier, withAtomics, forwardLateFromWriteback,
-      forwardBase, withDebugRegFilePort, memoryStall)
+      forwardBase, withDebugRegFilePort, memoryStall, memoryLatency,
+      icacheBytes, dcacheBytes, cacheLineBytes)
     val created = new PluginHost()
     // Registering a holder, not the component, lets a plugin reach the
     // interface without the interface having to know which plugins exist.

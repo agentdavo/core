@@ -93,12 +93,19 @@ class LsuPlugin extends AxiomPlugin {
   private var trap: TrapCmd = null
   private var bus: DBus = null
 
+  /** True on the cycles a load's data is actually on hand. Read by the
+    * register file's interlock, which is why it is a Handle: it is claimed in
+    * setup and driven in build.
+    */
+  private val loadDataReady = spinal.core.fiber.Handle[Bool]()
+
   val setupLogic = during setup new Area {
     bus = host[MemoryService].newDataPort()
     host[DecoderService].claim(SEL, opcodes, subFunctionLegal)
     // A load's data has not left memory when execute needs it, which is the
     // one hazard forwarding cannot cover and the reason the interlock exists.
-    host[RegFileService].addResult(SEL_LOAD, RESULT, availableAt = Stages.WRITEBACK)
+    host[RegFileService].addResult(SEL_LOAD, RESULT, availableAt = Stages.WRITEBACK,
+      ready = loadDataReady)
     host[RegFileService].addResult(SEL_ATOMIC, ATOMIC_OLD, availableAt = Stages.WRITEBACK)
     trap = host[TrapService].newTrapPort()
   }
@@ -176,6 +183,7 @@ class LsuPlugin extends AxiomPlugin {
       val present = full || bus.rvalid
       val word = Mux(full, data, bus.rdata)
     }
+    loadDataReady.load(response.present)
 
     // =================================================================
     // Decode: split the claim into the two result paths, early enough for

@@ -3,6 +3,7 @@ package axiom
 import spinal.core._
 import spinal.lib._
 import spinal.lib.misc.pipeline._
+import spinal.core.fiber.Handle
 
 /** Registration interface of the instruction decoder.
   *
@@ -72,8 +73,26 @@ trait RegFileService {
     *        producer is not there yet. An ALU result is ready in execute, a
     *        load's is not ready until writeback, and an atomic's old value
     *        appears in memory.
+    * @param ready for a source that reaches its stage and then waits there.
+    *        `availableAt` says which stage the value appears in, which is a
+    *        fact about the pipeline; this says whether it has appeared yet,
+    *        which is a fact about this cycle. A load behind a cache is in
+    *        writeback long before its data is, and forwarding what is on that
+    *        wire meanwhile hands a consumer whatever the memory happened to be
+    *        driving. Backpressure does not save it: a stalled writeback still
+    *        lets the read stage advance into an empty execute, so the
+    *        interlock has to be told.
+    *
+    *        A Handle because the signal usually does not exist when the source
+    *        is registered: producers claim their results in setup and build
+    *        their logic afterwards.
     */
-  def addResult(sel: Payload[Bool], data: Payload[Bits], availableAt: Int = Stages.EXECUTE): Unit
+  def addResult(
+      sel: Payload[Bool],
+      data: Payload[Bits],
+      availableAt: Int = Stages.EXECUTE,
+      ready: Handle[Bool] = null
+  ): Unit
 }
 
 /** The predicate register file. */
@@ -119,4 +138,20 @@ case class TrapCmd() extends Bundle {
 trait MemoryService {
   def newInstructionPort(): IBus
   def newDataPort(): DBus
+}
+
+/** Source of ports on whatever sits behind a cache.
+  *
+  * A separate service from [[MemoryService]] on purpose. The core asks for a
+  * memory; a cache asks for a memory too, and is itself a memory to the core.
+  * Two names keep the two roles apart, so a plugin cannot accidentally answer
+  * the wrong one and the profile decides which side of the cache each memory
+  * is on.
+  *
+  * The port is a [[DBus]]: a cache refills a line one doubleword at a time and
+  * writes through the same way, so it needs nothing an ordinary data port does
+  * not already have.
+  */
+trait BackingMemoryService {
+  def newBackingPort(): DBus
 }

@@ -61,6 +61,22 @@ class TrapPlugin extends AxiomPlugin with TrapService {
 
     val stopped = halted || stopNow
 
+    /** Stopping is not finished until everything older has committed.
+      *
+      * `stopNow` fires as soon as the offending instruction is *present* in
+      * execute, which is not the same as it being the oldest thing in the
+      * machine: an instruction ahead of it may still be waiting on memory. It
+      * is thrown either way and the older ones drain and commit normally, so
+      * the architectural state does end up right, but between the two the
+      * machine is stopped and the state is not yet what stopping promised.
+      *
+      * With a memory that answered next cycle the gap was too small to
+      * observe. A cache miss is tens of cycles, and the first program run
+      * through one reported a register the load had not reached yet.
+      */
+    val draining = ctrl(Stages.MEMORY).isValid || ctrl(Stages.WRITEBACK).isValid
+    val finished = halted && !draining
+
     // The offending instruction must not commit, and nothing behind it may
     // start. Older instructions are untouched and drain normally.
     node.throwWhen(stopNow)
@@ -71,14 +87,14 @@ class TrapPlugin extends AxiomPlugin with TrapService {
     // ---- counters --------------------------------------------------------
     val cycles = Reg(UInt(32 bits)) init 0
     val retired = Reg(UInt(32 bits)) init 0
-    when(!halted) { cycles := cycles + 1 }
+    when(!finished) { cycles := cycles + 1 }
     val writeback = ctrl(Stages.WRITEBACK)
     val committing = writeback.down.isFiring && writeback.down(Global.LAST_BEAT)
     when(committing) { retired := retired + 1 }
 
     // ---- reporting -------------------------------------------------------
     val io = host[InterfaceService].io
-    io.halted := halted
+    io.halted := finished
     io.trapped := trapped
     io.cause := causeReg
     io.trapPc := pcReg

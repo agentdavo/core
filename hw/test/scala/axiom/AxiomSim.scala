@@ -83,6 +83,52 @@ object AxiomSim {
     config.workspaceName("AxiomSocStalling")
       .compile(new AxiomSoc(memWords = MemWords, memoryStall = 5))
 
+  /** Caches in front of a memory that takes eight cycles to answer.
+    *
+    * Eight is chosen to be clearly worth caching without being so slow that
+    * every measurement is dominated by misses.
+    */
+  lazy val socCached: SimCompiled[AxiomSoc] =
+    config.workspaceName("AxiomSocCached")
+      .compile(new AxiomSoc(memWords = MemWords, memoryLatency = 8,
+        plugins = AxiomProfile.cached))
+
+  /** Cache variants used to localise faults: one with a memory that answers
+    * immediately, one with a line of a single word.
+    */
+  lazy val socCachedFast: SimCompiled[AxiomSoc] =
+    config.workspaceName("AxiomSocCachedFast")
+      .compile(new AxiomSoc(memWords = MemWords, memoryLatency = 1,
+        plugins = AxiomProfile.cached))
+
+  lazy val socCachedShortLine: SimCompiled[AxiomSoc] =
+    config.workspaceName("AxiomSocCachedShort")
+      .compile(new AxiomSoc(memWords = MemWords, memoryLatency = 8, cacheLineBytes = 16,
+        plugins = AxiomProfile.cached))
+
+  lazy val socCachedLongLine: SimCompiled[AxiomSoc] =
+    config.workspaceName("AxiomSocCachedLong")
+      .compile(new AxiomSoc(memWords = MemWords, memoryLatency = 8, cacheLineBytes = 64,
+        plugins = AxiomProfile.cached))
+
+  /** The same memory, the same everything, with the caches taken out. This is
+    * what the caches have to beat for any of this to have been worth building,
+    * and it is the only comparison that isolates them.
+    */
+  lazy val socUncached: SimCompiled[AxiomSoc] =
+    config.workspaceName("AxiomSocUncached")
+      .compile(new AxiomSoc(memWords = MemWords, memoryLatency = 8,
+        icacheBytes = 0, dcacheBytes = 0, plugins = AxiomProfile.cached))
+
+  /** Caches of a given size in front of the same slow memory, for sizing. */
+  private val sized = scala.collection.mutable.Map[(Int, Int, Int), SimCompiled[AxiomSoc]]()
+  def socSized(icache: Int, dcache: Int, line: Int = 32): SimCompiled[AxiomSoc] =
+    sized.getOrElseUpdate((icache, dcache, line),
+      config.workspaceName(s"AxiomSocCache_${icache}_${dcache}_$line")
+        .compile(new AxiomSoc(memWords = MemWords, memoryLatency = 8,
+          icacheBytes = icache, dcacheBytes = dcache, cacheLineBytes = line,
+          plugins = AxiomProfile.cached)))
+
   /** Reset vector at 0x400 rather than 0. */
   val AltResetVector: Int = 0x400
   lazy val socAltReset: SimCompiled[AxiomSoc] =

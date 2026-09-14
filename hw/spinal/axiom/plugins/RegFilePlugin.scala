@@ -40,12 +40,20 @@ import scala.collection.mutable.ArrayBuffer
   */
 class RegFilePlugin extends AxiomPlugin with RegFileService {
 
-  private case class Source(sel: Payload[Bool], data: Payload[Bits], availableAt: Int)
+  private case class Source(
+      sel: Payload[Bool],
+      data: Payload[Bits],
+      availableAt: Int,
+      ready: spinal.core.fiber.Handle[Bool])
 
   private val sources = ArrayBuffer[Source]()
 
-  override def addResult(sel: Payload[Bool], data: Payload[Bits], availableAt: Int = Stages.EXECUTE): Unit =
-    sources += Source(sel, data, availableAt)
+  override def addResult(
+      sel: Payload[Bool],
+      data: Payload[Bits],
+      availableAt: Int = Stages.EXECUTE,
+      ready: spinal.core.fiber.Handle[Bool] = null
+  ): Unit = sources += Source(sel, data, availableAt, ready)
 
   val logic = during build new Area {
     val xlen = AxiomParam.XLEN.get
@@ -211,11 +219,20 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     rd.down(Global.RS_D) := readRd.value
 
     // ---- the load-use interlock -------------------------------------------
-    /** Is this node holding a producer whose value has not arrived by `upTo`?
-      * Those are the ones the forwarding multiplexers above leave out.
+    /** Is this node holding a producer whose value has not arrived yet?
+      *
+      * Two reasons it might not have. It belongs to a later stage than `upTo`,
+      * which is known at elaboration; or it belongs to this one and has not
+      * turned up, which is only known this cycle. A load behind a cache is the
+      * second: it reaches writeback in three cycles and its data in thirty.
       */
-    def unavailableAt(node: CtrlLink, upTo: Int): Bool = sources.filter(_.availableAt > upTo)
-      .map(source => node.down(source.sel)).reduceOption(_ || _).getOrElse(False)
+    def unavailableAt(node: CtrlLink, upTo: Int): Bool = sources
+      .map { source =>
+        val late = source.availableAt > upTo
+        val waiting = if (source.ready == null) False else !source.ready.get
+        if (late) node.down(source.sel) else node.down(source.sel) && waiting
+      }
+      .reduceOption(_ || _).getOrElse(False)
 
     def consumerNeeds(destination: UInt): Bool =
       (rd.down(Global.READS_RN) && rd.down(Global.RN_ADDR) === destination) ||

@@ -40,27 +40,43 @@ class FetchPlugin extends AxiomPlugin {
     val fetchNode = ctrl(Stages.FETCH)
     val decodeNode = ctrl(Stages.DECODE)
 
-    /** The one-deep response buffer, and decode's wait on it. */
+    /** The one-deep response buffer, decode's wait on it, and the answer
+      * nobody is left to take.
+      *
+      * A transaction thrown for a stale generation does not fire, but it does
+      * leave, so `isMoving` rather than `isFiring` decides whether a word has
+      * been consumed. Leaving a taken word in the buffer would hand the
+      * instruction from a killed address to whatever arrived next, which is a
+      * branch executing the instruction it jumped over.
+      *
+      * A transaction can also be thrown *before* its word arrives, and then it
+      * leaves owing one. The answer turns up with nobody at decode to take it,
+      * fills the buffer, and stops fetch from ever asking again: the machine
+      * simply stops. That cannot happen when the memory answers the next
+      * cycle, because the transaction is still there when it does. Behind a
+      * cache the wait is tens of cycles and a redirect lands in the middle of
+      * it, so one orphan is remembered and the response it belongs to is
+      * dropped when it arrives.
+      */
     val buffer = new Area {
       val data = Reg(Bits(Isa.INSTR_BITS bits)) init 0
       val full = Reg(Bool()) init False
+      val orphan = Reg(Bool()) init False
 
-      // isMoving, not isFiring. A transaction thrown for a stale generation
-      // does not fire, but it does leave, and its response still has to be
-      // taken: the command was issued, the answer is owed, and leaving it in
-      // the buffer hands the instruction from the killed address to whatever
-      // arrives next. That is a branch executing the instruction it jumped
-      // over, which is exactly what it did before this read isMoving.
-      val taken = decodeNode.up.isMoving
-
-      when(bus.rvalid) { data := bus.data }
-      full := (full || bus.rvalid) && !taken
-
-      // Arriving and stored are both acceptable: a word that turns up on the
-      // cycle decode is ready goes straight through without a cycle in the
-      // buffer, which is what keeps a one-cycle memory at one cycle.
-      val present = full || bus.rvalid
+      // Arriving and stored are both acceptable, which is what keeps a
+      // one-cycle memory at one cycle; an answer owed to a transaction that
+      // has already gone is neither.
+      val usable = bus.rvalid && !orphan
+      val present = full || usable
       val word = Mux(full, data, bus.data)
+
+      val leaving = decodeNode.up.isMoving
+      val taken = leaving && present
+      val abandoned = leaving && !present
+
+      when(usable) { data := bus.data }
+      full := (full || usable) && !taken
+      orphan := (orphan || abandoned) && !bus.rvalid
     }
 
     decodeNode.up(Global.INSTRUCTION) := buffer.word
