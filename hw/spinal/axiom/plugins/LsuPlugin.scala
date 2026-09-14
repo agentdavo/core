@@ -32,16 +32,18 @@ class LsuPlugin extends AxiomPlugin {
     */
   val SEL_LOAD = Payload(Bool())
 
-  /** An atomic. Its old value is ready combinationally in the memory stage, on
-    * the second of its two passes, so it forwards from there like ordinary
-    * arithmetic rather than arming the interlock.
+  /** An atomic. Its old value is captured in the memory stage, but only on
+    * the second of its two passes there, so it is declared as arriving in
+    * writeback rather than in memory.
     *
-    * The distinction matters. An atomic holds the memory stage for two cycles,
-    * so a consumer can sit in execute while it finishes, which is a pairing
-    * the interlock does not cover: the interlock only knows about a producer
-    * exactly one stage ahead for exactly one cycle. Because the consumer can
-    * only advance on the cycle the atomic completes, forwarding from the
-    * memory stage is both correct and sufficient here.
+    * That is one cycle more pessimistic than the value strictly needs, and the
+    * pessimism is the point. A memory-stage declaration would be read by a
+    * consumer sitting in the read stage on the atomic's *first* pass, when the
+    * old value has not been captured yet and nothing is holding the consumer
+    * back: the stage ahead of it is empty, so there is no backpressure. By the
+    * time the atomic reaches writeback the value is registered and stable, and
+    * the interlock covers the wait. Atomics are rare enough that the cycle is
+    * not worth a special case in the forwarding network.
     */
   val SEL_ATOMIC = Payload(Bool())
 
@@ -96,8 +98,8 @@ class LsuPlugin extends AxiomPlugin {
     host[DecoderService].claim(SEL, opcodes, subFunctionLegal)
     // A load's data has not left memory when execute needs it, which is the
     // one hazard forwarding cannot cover and the reason the interlock exists.
-    host[RegFileService].addResult(SEL_LOAD, RESULT, late = true)
-    host[RegFileService].addResult(SEL_ATOMIC, ATOMIC_OLD, late = false)
+    host[RegFileService].addResult(SEL_LOAD, RESULT, availableAt = Stages.WRITEBACK)
+    host[RegFileService].addResult(SEL_ATOMIC, ATOMIC_OLD, availableAt = Stages.WRITEBACK)
     trap = host[TrapService].newTrapPort()
   }
 
@@ -214,6 +216,12 @@ class LsuPlugin extends AxiomPlugin {
       val destination = node.bypass(Global.RD_ADDR)
       destination := node.up(Global.RD_ADDR)
       when(kind.isPair && beat) { destination := node.up(Global.RM_ADDR) }
+
+      // Once the second pass is the one in flight, RD_ADDR names the second
+      // register itself and the promise made at decode is being kept.
+      val writesRm = node.bypass(Global.WRITES_RM)
+      writesRm := node.up(Global.WRITES_RM)
+      when(kind.isPair && beat) { writesRm := False }
 
       val writesBase = node.bypass(Global.WRITES_BASE)
       writesBase := node.up(Global.WRITES_BASE)

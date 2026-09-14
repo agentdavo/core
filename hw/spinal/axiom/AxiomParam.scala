@@ -84,10 +84,32 @@ object AxiomParam {
   */
 object Stages {
   val FETCH     = 0 // present the program counter to the instruction bus
-  val DECODE    = 1 // instruction has arrived, decode and read registers
-  val EXECUTE   = 2 // arithmetic, address generation, branch resolution
-  val MEMORY    = 3 // data bus access
-  val WRITEBACK = 4 // select the result and write the register file
+  val DECODE    = 1 // instruction has arrived, decode it
+  val READ      = 2 // read the register file and forward into it
+  val EXECUTE   = 3 // arithmetic, address generation, branch resolution
+  val MEMORY    = 4 // data bus access
+  val WRITEBACK = 5 // select the result and write the register file
 
-  val COUNT = 5
+  val COUNT = 6
+
+  /** Why the register read has a stage to itself.
+    *
+    * With the read, the forwarding network and the ALU all in execute, the
+    * measured critical path ran distributed RAM output, forwarding
+    * multiplexer, ALU, result multiplexer, in series, and held the core to
+    * 34.7 MHz on an ECP5. Splitting them gives each half roughly half the
+    * path.
+    *
+    * The read and the forwarding have to stay in the same stage as each other,
+    * whichever stage that is. Capturing an operand and then correcting it by
+    * forwarding in a later stage is unsound: if the instruction is held by
+    * backpressure and its producer commits and leaves the pipeline while it
+    * waits, the forwarding source disappears and the stale captured value is
+    * used. This core had that bug once. Reading and forwarding together means
+    * the whole value is recomputed every cycle the instruction is held.
+    *
+    * The cost is one more cycle of branch shadow and one more interlock cycle
+    * on a load-use pair, because operands are now captured a stage earlier.
+    */
+  val READ_STAGE_RATIONALE = ()
 }

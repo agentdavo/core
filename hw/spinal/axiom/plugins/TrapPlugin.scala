@@ -64,6 +64,7 @@ class TrapPlugin extends AxiomPlugin with TrapService {
     // The offending instruction must not commit, and nothing behind it may
     // start. Older instructions are untouched and drain normally.
     node.throwWhen(stopNow)
+    ctrl(Stages.READ).throwWhen(stopped)
     ctrl(Stages.DECODE).throwWhen(stopped)
     ctrl(Stages.FETCH).haltWhen(stopped)
 

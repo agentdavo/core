@@ -66,6 +66,18 @@ object Global extends AreaObject {
   val WRITES_BASE = Payload(Bool())
   val BASE_VALUE  = Payload(Bits(AxiomParam.XLEN bits))
 
+  /** The instruction still owes a write to the register named by `RM_ADDR`.
+    *
+    * A load pair writes two registers from one instruction, and it does so by
+    * taking a second pass through the memory stage with `RD_ADDR` overridden
+    * to the rm field. Before that second pass exists there is nothing in the
+    * pipeline naming the second register, so the interlock would let a
+    * consumer of it read a stale value straight out of the file. This flag
+    * names it from decode and the load/store unit clears it once the pass
+    * that performs the write is the one in flight.
+    */
+  val WRITES_RM = Payload(Bool())
+
   /** The final transaction of an instruction.
     *
     * A pair goes through the memory stage twice and so puts two transactions

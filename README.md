@@ -8,7 +8,7 @@ against reference models with Verilator as the backend.
 | --- | --- | --- |
 | Width | 32-bit | 64-bit |
 | Registers | 16 general | 32 general, 8 predicate |
-| Implementation | `C1`, fixed five stage | `A1`, five stage, fully plugin-composed |
+| Implementation | `C1`, fixed five stage | `A1`, six stage, fully plugin-composed |
 | Memory | Fixed latency, no backpressure | Fixed latency, backpressure-ready pipeline |
 | Structure | One component per block | Every part is a plugin |
 | Spec | [docs/isa.md](docs/isa.md) | [docs/axiom/isa.md](docs/axiom/isa.md) |

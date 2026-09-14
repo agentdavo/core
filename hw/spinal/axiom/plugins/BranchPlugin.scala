@@ -7,11 +7,21 @@ import spinal.lib.misc.pipeline._
 
 /** Branches, jumps and the link they write.
   *
-  * Resolution is in execute, against forwarded operands, so a branch may
-  * immediately follow the compare that produced its predicate. The front end
-  * always predicts not taken, so a taken branch costs the two instructions
-  * behind it; the program counter plugin discards those by generation rather
-  * than this plugin having to know how many there are.
+  * A conditional branch resolves in execute, against forwarded operands, so it
+  * may immediately follow the compare that produced its predicate. The front
+  * end always predicts not taken, so a taken conditional branch costs the
+  * three instructions behind it.
+  *
+  * An unconditional relative branch does not wait for that. Its target is the
+  * program counter plus a displacement, and both are known in decode, so it
+  * redirects from there and costs one instruction instead of three. That is
+  * worth doing because the pipeline has a decode stage that was otherwise idle
+  * and because calls and returns dominate the taken branches in real code:
+  * this recovers most of what the separate register-read stage cost.
+  *
+  * The two redirects are exclusive by opcode, so nothing has to reconcile
+  * them. The program counter plugin is told which stage each one comes from
+  * and discards only the instructions younger than it.
   */
 class BranchPlugin extends AxiomPlugin {
 
@@ -19,16 +29,31 @@ class BranchPlugin extends AxiomPlugin {
   val RESULT = Payload(Bits(AxiomParam.XLEN bits))
 
   private var redirect: Flow[UInt] = null
+  private var earlyRedirect: Flow[UInt] = null
 
   val setupLogic = during setup new Area {
     host[DecoderService].claim(SEL, Seq(Isa.B, Isa.BL, Isa.BP, Isa.JALR))
     // BL and JALR write a return address; B and BP write nothing, and the
     // decoder already knows which is which.
     host[RegFileService].addResult(SEL, RESULT)
-    redirect = host[PcService].newRedirect()
+    earlyRedirect = host[PcService].newRedirect(Stages.DECODE)
+    redirect = host[PcService].newRedirect(Stages.EXECUTE)
   }
 
   val logic = during build new Area {
+    // ---- the unconditional relative branch, folded in decode -------------
+    val early = new Area {
+      val node = ctrl(Stages.DECODE)
+      val opcode = node(Global.INSTRUCTION)(Isa.OP_HI downto Isa.OP_LO)
+      val isRelative = opcode === B(Isa.B, 6 bits) || opcode === B(Isa.BL, 6 bits)
+
+      // isFiring, not isValid: a branch held in decode must redirect on the
+      // cycle it leaves, not on every cycle it waits, or it would bump the
+      // fetch generation repeatedly and discard its own target fetch.
+      earlyRedirect.valid := node.down.isFiring && node(SEL) && isRelative
+      earlyRedirect.payload := node(Global.PC) + node(Global.BRANCH_OFF)
+    }
+
     val node = ctrl(Stages.EXECUTE)
     val instr = node(Global.INSTRUCTION)
     val opcode = instr(Isa.OP_HI downto Isa.OP_LO)
@@ -41,7 +66,9 @@ class BranchPlugin extends AxiomPlugin {
     val predicate = host[PredicateService].read(instr(25 downto 23).asUInt)
     val sense = instr(22)
 
-    val taken = !isConditional || (predicate ^ sense)
+    // B and BL are absent here: decode has already redirected for them, and
+    // repeating it would throw the correct successors it just fetched.
+    val taken = (isIndirect || isConditional) && (!isConditional || (predicate ^ sense))
 
     val relativeTarget = node(Global.PC) + node(Global.BRANCH_OFF)
     // A computed target has its low two bits cleared rather than trapping, so

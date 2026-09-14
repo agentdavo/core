@@ -1,6 +1,6 @@
 # A1: the first Axiom-64 implementation
 
-A1 is a five stage, in-order, single-issue pipeline implementing the Base
+A1 is a six stage, in-order, single-issue pipeline implementing the Base
 profile. Every part of it is a plugin.
 
 This document is about the *structure*, because that is the part that differs
@@ -32,7 +32,7 @@ All of it arrives as plugins:
 
 | Plugin | Owns |
 | --- | --- |
-| `PipelinePlugin` | The five control links and the connections between them |
+| `PipelinePlugin` | The six control links and the connections between them |
 | `PcPlugin` | The program counter, redirects, and the branch shadow |
 | `FetchPlugin` | Driving the instruction port |
 | `DecoderPlugin` | Field extraction, hazard information, and routing |
@@ -127,11 +127,17 @@ way, so `SelectPlugin` can call `read` without caring who builds first.
 
 ## 4. The pipeline
 
-Five stages, each a `CtrlLink`, connected by `StageLink` registers.
+Six stages, each a `CtrlLink`, connected by `StageLink` registers.
 
 ```
- fetch --- decode --- execute --- memory --- writeback
+ fetch --- decode --- read --- execute --- memory --- writeback
 ```
+
+The register read has a stage to itself, and that was measured rather than
+assumed. With the read, the forwarding network and the ALU all in one stage,
+the critical path ran distributed RAM output, forwarding multiplexer, ALU,
+result multiplexer, in series, and held the core to 34.7 MHz on an ECP5.
+Splitting the stage gives each half roughly half the path.
 
 Using control links rather than hand-written stage registers is what buys
 backpressure. A plugin that needs to stall calls `haltWhen` on its stage and
@@ -154,52 +160,69 @@ always going to cost. It is visible here rather than hidden, and it is why a
 
 ## 5. Hazards
 
-The register file is read in **execute**, not in decode, and that is the
-decision the rest of the hazard handling follows from.
+The register file read and the forwarding network are in the **same** stage,
+and that is the decision the rest of the hazard handling follows from. Which
+stage matters much less than the fact that they are together.
 
-Reading in decode means an operand is captured into a pipeline register and
-then corrected by forwarding. If the instruction is later held in execute by
-backpressure, and its producer commits and leaves the pipeline while it waits,
-the forwarding source disappears and the stale captured value is used. That is
-a real bug, and this core had it: it showed up in randomized co-simulation as a
-consumer two instructions after an atomic reading a stale base register.
-Reading in execute makes the read repeat every cycle the instruction is held,
-so a value that has already reached the register file is simply read from it.
+Reading in one stage and forwarding in a later one means an operand is captured
+into a pipeline register and then corrected afterwards. If the instruction is
+held by backpressure, and its producer commits and leaves the pipeline while it
+waits, the forwarding source disappears and the stale captured value is used.
+That is a real bug, and this core had it: it showed up in randomized
+co-simulation as a consumer two instructions after an atomic reading a stale
+base register. Reading and forwarding together makes the whole value recompute
+every cycle the instruction is held, so a value that has already reached the
+register file is simply read from it.
 
-What remains is two forwarding distances instead of three:
+From the read stage there are three forwarding distances:
 
 | Producer is | It sits in | Covered by |
 | --- | --- | --- |
-| one instruction ahead | memory | forwarded into execute |
-| two ahead | writeback | forwarded into execute |
-| three or more ahead | already committed | the register read finds it |
+| one instruction ahead | execute | forwarded, if its value exists yet |
+| two ahead | memory | forwarded |
+| three ahead | writeback | forwarded |
+| four or more ahead | already committed | the register read finds it |
 
 Two producers per instruction have to be forwarded, not one, because
 pre-index, post-index and the pair forms all write a base register as well as a
 destination. That second comparator on every operand is the honest price of
 auto-increment addressing.
 
-The interlock covers the one case forwarding cannot: a load in the memory
-stage whose data has not arrived. Execute holds for one cycle, which turns it
-into the two-ahead case.
+"If its value exists yet" is the whole of the interlock. Every producer
+declares the stage in which its result actually appears — execute for
+arithmetic, memory for an atomic's old value, writeback for a load or a
+multiply — and the forwarding multiplexer for a stage only offers the sources
+that have arrived by then. Anything it leaves out holds the read stage instead.
+One flag drives both, so a new functional unit cannot forward a value that does
+not exist and cannot silently skip the stall that replaces it.
 
-Atomics deliberately do **not** use the interlock. An atomic holds the memory
-stage for two cycles, so a consumer can sit in execute while it finishes, and
-that pairing is outside what the interlock models. Instead the atomic's old
-value is registered as an ordinary early result and forwarded from the memory
-stage. It is correct because a consumer can only advance on the cycle the
-atomic completes, which is exactly the cycle the value is valid.
+A load pair is the one instruction that promises a write it cannot yet name.
+It writes two registers by taking a second pass through the memory stage with
+its destination field overridden, so before that pass exists nothing in the
+pipeline mentions the second register. `WRITES_RM` names it from decode and the
+load/store unit clears it once the pass that keeps the promise is in flight.
 
 ## 6. Branches
 
-Predict not taken, resolve in execute against forwarded operands, so a branch
-may immediately follow the compare that set its predicate.
+A conditional branch predicts not taken and resolves in execute against
+forwarded operands, so it may immediately follow the compare that set its
+predicate. Taken, it kills the three instructions behind it.
 
-A taken branch kills the two instructions behind it, but the branch plugin does
-not know there are two. The program counter plugin keeps a generation counter,
-bumped on every redirect; each fetched instruction carries the generation it
-was fetched under, and decode discards anything stale. Adding a fetch stage
-later costs nothing anywhere else.
+An unconditional relative branch does not wait for execute. Its target is the
+program counter plus a displacement and both are known in decode, so it
+redirects from there and kills one instruction instead of three. Calls and
+unconditional jumps dominate the taken branches in ordinary code, and folding
+them in decode recovered almost all of the cycles the separate read stage cost:
+on the demo program, 275 cycles became 235, against 233 for the five-stage
+core, while the clock went up by a fifth.
+
+Neither branch plugin counts stages. Each redirect port is registered with the
+stage it comes from; the program counter plugin throws the stages in front of
+it and bumps a generation counter, and each fetched instruction carries the
+generation it was fetched under so decode discards anything stale. A redirect
+from a deeper stage wins over one from a shallower stage in the same cycle,
+because the deeper instruction is the older one. Adding a stage costs nothing
+anywhere else, which is exactly what adding the read stage demonstrated.
 
 ## 7. Stopping
 

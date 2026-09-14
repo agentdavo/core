@@ -15,11 +15,13 @@ import scala.collection.mutable.ArrayBuffer
   */
 class PcPlugin extends AxiomPlugin with PcService {
 
-  private val redirectPorts = ArrayBuffer[Flow[UInt]]()
+  case class Redirect(from: Int, port: Flow[UInt])
 
-  override def newRedirect(): Flow[UInt] = {
+  private val redirectPorts = ArrayBuffer[Redirect]()
+
+  override def newRedirect(from: Int): Flow[UInt] = {
     val port = Flow(UInt(AxiomParam.PC_WIDTH bits))
-    redirectPorts += port
+    redirectPorts += Redirect(from, port)
     port
   }
 
@@ -38,12 +40,15 @@ class PcPlugin extends AxiomPlugin with PcService {
       pc := pc + 4
     }
 
-    // Later ports win, which is the right priority if a deeper stage ever
-    // gains the ability to redirect.
+    // Shallowest first, so a redirect from a deeper stage is assigned last and
+    // therefore wins. The deeper instruction is the older one, and an older
+    // instruction's control flow decision is the one that happened.
+    val ordered = redirectPorts.sortBy(_.from)
+
     val anyRedirect = False
-    for (port <- redirectPorts) {
-      when(port.valid) {
-        pc := port.payload
+    for (redirect <- ordered) {
+      when(redirect.port.valid) {
+        pc := redirect.port.payload
         anyRedirect := True
       }
     }
@@ -51,11 +56,21 @@ class PcPlugin extends AxiomPlugin with PcService {
       gen := gen + 1
     }
 
-    // Kill the branch shadow. The instruction sitting in decode this cycle was
-    // fetched before the redirect but still carries the current generation, so
-    // it needs the explicit term; everything already in flight behind it is
-    // caught by the generation compare when it arrives.
+    // Kill the branch shadow. Every instruction already inside the pipeline
+    // and younger than the redirecting one needs an explicit throw, because it
+    // was fetched before the redirect and still carries the current
+    // generation. Everything still in flight behind them is caught by the
+    // generation compare as it arrives at decode.
+    //
+    // A redirect only throws the stages in front of its own, which is what
+    // lets an unconditional branch resolve in decode without discarding
+    // itself.
+    for (stage <- Stages.DECODE until Stages.WRITEBACK) {
+      val younger = ordered.filter(_.from > stage).map(_.port.valid)
+      if (younger.nonEmpty) ctrl(stage).throwWhen(younger.reduce(_ || _))
+    }
+
     val decodeNode = ctrl(Stages.DECODE)
-    decodeNode.throwWhen(anyRedirect || decodeNode.up(Global.FETCH_GEN) =/= gen)
+    decodeNode.throwWhen(decodeNode.up(Global.FETCH_GEN) =/= gen)
   }
 }

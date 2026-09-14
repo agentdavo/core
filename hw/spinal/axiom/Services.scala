@@ -29,10 +29,16 @@ trait DecoderService {
 /** Program counter ownership and redirection. */
 trait PcService {
 
-  /** Allocate a redirect port. Driving it valid sends the front end to `payload`
-    * and kills everything fetched before this cycle.
+  /** Allocate a redirect port for an instruction sitting in stage `from`.
+    *
+    * Driving it valid sends the front end to `payload` and kills everything
+    * fetched behind it. The stage is the only thing the program counter needs
+    * to be told: it decides which stages hold instructions younger than the
+    * redirecting one, and those are exactly the ones thrown. A redirect from a
+    * deeper stage wins over one from a shallower stage in the same cycle,
+    * because the deeper instruction is the older one.
     */
-  def newRedirect(): Flow[UInt]
+  def newRedirect(from: Int): Flow[UInt]
 }
 
 /** The general register file.
@@ -49,12 +55,14 @@ trait RegFileService {
     * them in any stage at or before writeback and the pipeline carries them
     * forward. Exactly one registered source may be selected at a time.
     *
-    * @param late the value is not ready until writeback, as a load's is. Late
-    *        sources are excluded from the memory-stage forwarding path and
-    *        instead arm the load-use interlock, which is the only hazard
-    *        forwarding cannot cover.
+    * @param availableAt the first stage in which `data` actually holds the
+    *        result. The forwarding network only offers a source to stages at
+    *        or after that point, and the interlock holds a consumer whose
+    *        producer is not there yet. An ALU result is ready in execute, a
+    *        load's is not ready until writeback, and an atomic's old value
+    *        appears in memory.
     */
-  def addResult(sel: Payload[Bool], data: Payload[Bits], late: Boolean = false): Unit
+  def addResult(sel: Payload[Bool], data: Payload[Bits], availableAt: Int = Stages.EXECUTE): Unit
 }
 
 /** The predicate register file. */

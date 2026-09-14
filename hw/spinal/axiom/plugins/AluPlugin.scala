@@ -72,7 +72,7 @@ class AluPlugin extends AxiomPlugin {
     host[DecoderService].claim(SEL, opcodes, subFunctionLegal)
     host[RegFileService].addResult(SEL_ALU, RESULT)
     if (AxiomParam.WITH_MULTIPLIER.get) {
-      host[RegFileService].addResult(SEL_MUL, MUL_RESULT, late = true)
+      host[RegFileService].addResult(SEL_MUL, MUL_RESULT, availableAt = Stages.WRITEBACK)
     }
   }
 
@@ -175,16 +175,27 @@ class AluPlugin extends AxiomPlugin {
       * halves. Only the high halves carry a sign, and only when the function is
       * the signed high multiply, so one sign-extension mux covers all four
       * multiply functions exactly as a single wide multiplier did.
+      *
+      * The operands come straight from the pipeline registers rather than from
+      * `a` and `srcB`, and the sign control straight from the instruction
+      * rather than from `fn`. Every multiply is a three-register form, so the
+      * second-operand multiplexer and the function remapping both resolve to
+      * the identity here; going through them anyway put an opcode-wide
+      * multiplexer in front of the multiplier array, and that multiplexer
+      * measured as the critical path of the whole core.
       */
     val multiplyIssue = AxiomParam.WITH_MULTIPLIER.get generate new Area {
-      val signedOp = fn === Isa.Fn.MULH
+      val mulA = node(Global.RS_N)
+      val mulB = node(Global.RS_M)
+      val signedOp = instr(10 downto 6).asUInt === Isa.Fn.MULH
+
       def high(value: Bits) = ((signedOp && value(xlen - 1)) ## value(xlen - 1 downto half)).asSInt
       def low(value: Bits) = (False ## value(half - 1 downto 0)).asSInt
 
-      node(PP_HH) := high(a) * high(b)
-      node(PP_HL) := high(a) * low(b)
-      node(PP_LH) := low(a) * high(b)
-      node(PP_LL) := low(a) * low(b)
+      node(PP_HH) := high(mulA) * high(mulB)
+      node(PP_HL) := high(mulA) * low(mulB)
+      node(PP_LH) := low(mulA) * high(mulB)
+      node(PP_LL) := low(mulA) * low(mulB)
     }
 
     val aluResult = Bits(xlen bits)

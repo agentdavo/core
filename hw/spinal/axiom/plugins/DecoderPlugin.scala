@@ -72,6 +72,10 @@ class DecoderPlugin extends AxiomPlugin with DecoderService {
       opIs(Isa.LOADS) || opIs(Isa.LDP) || opIs(Isa.BL) || opIs(Isa.JALR) ||
       opIs(Isa.LD_ORD) || opIs(Isa.ATOMIC)
 
+    // A load pair is the only instruction that writes a second general
+    // register, and it always names it in the rm field.
+    node(Global.WRITES_RM) := opIs(Isa.LDP)
+
     node(Global.WRITES_PD) := opIs(Isa.CMP_R) || opIs(Isa.CMP_I)
 
     node(Global.READS_RN) := opIs(aluOpcodes) || opIs(Isa.CMP_R) || opIs(Isa.CMP_I) ||

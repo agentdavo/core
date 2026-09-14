@@ -13,34 +13,39 @@ import scala.collection.mutable.ArrayBuffer
   * computes a result never has to know which stage the write happens in, how
   * many other producers exist, or how the value reaches a consumer behind it.
   *
-  * The registers are read in **execute**, not in decode. That is the decision
-  * everything else here follows from, and it is worth being explicit about
-  * why. Reading in decode means an operand is captured into a pipeline
-  * register and then only corrected by forwarding. If the instruction is then
-  * held in execute by backpressure, and its producer commits and leaves the
-  * pipeline while it waits, the forwarding source disappears and the stale
-  * captured value is used. That is a real bug and this core had it. Reading in
-  * execute makes the read repeat every cycle the instruction is held, so a
-  * value that has already reached the register file is simply read from it.
+  * The registers are read in **read**, its own stage, and the forwarding
+  * network sits in that same stage. The pairing is the decision everything
+  * else here follows from, and it is worth being explicit about why. Reading
+  * in one stage and forwarding in a later one means an operand is captured
+  * into a pipeline register and then only corrected afterwards. If the
+  * instruction is held by backpressure, and its producer commits and leaves
+  * the pipeline while it waits, the forwarding source disappears and the stale
+  * captured value is used. That is a real bug and this core had it. Reading
+  * and forwarding together makes the whole value recompute every cycle the
+  * instruction is held, so a value that has already reached the register file
+  * is simply read from it.
   *
-  * What remains is two forwarding distances rather than three:
+  * From the read stage there are three forwarding distances:
   *
-  *  - one instruction ahead, sitting in memory: forwarded
-  *  - two ahead, sitting in writeback: forwarded
-  *  - three or more ahead: already committed, so the read finds it
+  *  - one instruction ahead, sitting in execute: forwarded, if its value is
+  *    ready there, which an ALU result is and a load or an atomic is not
+  *  - two ahead, sitting in memory: forwarded
+  *  - three ahead, sitting in writeback: forwarded
+  *  - four or more ahead: already committed, so the read finds it
   *
-  * A load one ahead is the single case forwarding cannot cover, because the
-  * data has not left memory yet. The interlock holds execute for the one cycle
-  * it takes to become the two-ahead case.
+  * Each producer declares the stage its value actually arrives in, and the
+  * interlock holds the read stage for exactly the cycles a consumer would
+  * otherwise reach past that. A load one ahead is the common case: its data
+  * has not left memory yet, so the consumer waits.
   */
 class RegFilePlugin extends AxiomPlugin with RegFileService {
 
-  private case class Source(sel: Payload[Bool], data: Payload[Bits], late: Boolean)
+  private case class Source(sel: Payload[Bool], data: Payload[Bits], availableAt: Int)
 
   private val sources = ArrayBuffer[Source]()
 
-  override def addResult(sel: Payload[Bool], data: Payload[Bits], late: Boolean = false): Unit =
-    sources += Source(sel, data, late)
+  override def addResult(sel: Payload[Bool], data: Payload[Bits], availableAt: Int = Stages.EXECUTE): Unit =
+    sources += Source(sel, data, availableAt)
 
   val logic = during build new Area {
     val xlen = AxiomParam.XLEN.get
@@ -97,13 +102,11 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
         Mux(live(address), banks(1)(port).readAsync(address), banks(0)(port).readAsync(address))
     }
 
+    val rd = ctrl(Stages.READ)
     val ex = ctrl(Stages.EXECUTE)
     val me = ctrl(Stages.MEMORY)
     val wb = ctrl(Stages.WRITEBACK)
 
-    /** Mux the registered producers. A late producer's value is meaningless
-      * before writeback, so the memory-stage copy leaves them out.
-      */
     /** Replicate a single bit across the data path, for one-hot masking. */
     def spread(bit: Bool): Bits = B(xlen bits, default -> bit)
 
@@ -119,10 +122,17 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     def oneHot(choices: Seq[(Bool, Bits)]): Bits =
       choices.map { case (sel, value) => value & spread(sel) }.reduceBalancedTree(_ | _)
 
-    class ResultMux(node: NodeApi, includeLate: Boolean) extends Area {
+    /** Mux the producers whose value has actually arrived by `upTo`.
+      *
+      * A source that is not ready yet is left out rather than muxed in and
+      * ignored: its payload has no driver at that stage at all, so reading it
+      * there would not elaborate. The interlock below covers exactly the
+      * sources this leaves out.
+      */
+    class ResultMux(node: NodeApi, upTo: Int) extends Area {
       val value = Bits(xlen bits)
       value := B(0, xlen bits)
-      for (source <- sources if includeLate || !source.late) {
+      for (source <- sources if source.availableAt <= upTo) {
         when(node(source.sel)) { value := node(source.data) }
       }
     }
@@ -130,12 +140,16 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     val forwardLate = AxiomParam.FORWARD_LATE_FROM_WRITEBACK.get
 
     // The commit multiplexer always sees every source; the forwarding copy may
-    // not, because a late source drags a block RAM read into the path.
-    val writebackCommit = new ResultMux(wb.down, includeLate = true)
-    val writebackForward = if (forwardLate) writebackCommit else new ResultMux(wb.down, includeLate = false)
-    val memoryResult = new ResultMux(me.down, includeLate = false)
+    // not, because a writeback-stage source drags a block RAM read into the
+    // path, which is what FORWARD_LATE_FROM_WRITEBACK trades away.
+    val forwardFromWriteback = if (forwardLate) Stages.WRITEBACK else Stages.MEMORY
+    val writebackCommit = new ResultMux(wb.down, Stages.WRITEBACK)
+    val writebackForward = if (forwardLate) writebackCommit else new ResultMux(wb.down, Stages.MEMORY)
+    val memoryResult = new ResultMux(me.down, Stages.MEMORY)
+    val executeResult = new ResultMux(ex.down, Stages.EXECUTE)
     def wbResult = writebackForward.value
     def memResult = memoryResult.value
+    def exResult = executeResult.value
 
     // ---- commit ---------------------------------------------------------
     val wbWritesRd = wb.down.isFiring && wb.down(Global.WRITES_RD) && wb.down(Global.RD_ADDR) =/= 0
@@ -145,6 +159,8 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     storage.write(1, wbWritesBase, wb.down(Global.RN_ADDR), wb.down(Global.BASE_VALUE))
 
     // ---- read and forward, both in execute --------------------------------
+    val exWritesRd = ex.isValid && ex.down(Global.WRITES_RD) && ex.down(Global.RD_ADDR) =/= 0
+    val exWritesBase = ex.isValid && ex.down(Global.WRITES_BASE) && ex.down(Global.RN_ADDR) =/= 0
     val memWritesRd = me.isValid && me.down(Global.WRITES_RD) && me.down(Global.RD_ADDR) =/= 0
     val memWritesBase = me.isValid && me.down(Global.WRITES_BASE) && me.down(Global.RN_ADDR) =/= 0
     val wbHasRd = wb.isValid && wb.down(Global.WRITES_RD) && wb.down(Global.RD_ADDR) =/= 0
@@ -172,41 +188,58 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       when(wbHasRd && wb.down(Global.RD_ADDR) === address) { value := wbResult }
       when(memWritesBase && me.down(Global.RN_ADDR) === address) { value := me.down(Global.BASE_VALUE) }
       when(memWritesRd && me.down(Global.RD_ADDR) === address) { value := memResult }
+      when(exWritesBase && ex.down(Global.RN_ADDR) === address) { value := ex.down(Global.BASE_VALUE) }
+      when(exWritesRd && ex.down(Global.RD_ADDR) === address) { value := exResult }
       when(address === 0) { value := B(0, xlen bits) }
     }
 
-    val readRn = new ReadPort(storage.PortRn, ex.down(Global.RN_ADDR))
-    val readRm = new ReadPort(storage.PortRm, ex.down(Global.RM_ADDR))
-    val readRd = new ReadPort(storage.PortRd, ex.down(Global.RD_ADDR))
+    val readRn = new ReadPort(storage.PortRn, rd.down(Global.RN_ADDR))
+    val readRm = new ReadPort(storage.PortRm, rd.down(Global.RM_ADDR))
+    val readRd = new ReadPort(storage.PortRd, rd.down(Global.RD_ADDR))
 
-    ex.down(Global.RS_N) := readRn.value
-    ex.down(Global.RS_M) := readRm.value
-    ex.down(Global.RS_D) := readRd.value
+    rd.down(Global.RS_N) := readRn.value
+    rd.down(Global.RS_M) := readRm.value
+    rd.down(Global.RS_D) := readRd.value
 
     // ---- the load-use interlock -------------------------------------------
-    def lateAt(node: CtrlLink): Bool = sources.filter(_.late)
+    /** Is this node holding a producer whose value has not arrived by `upTo`?
+      * Those are the ones the forwarding multiplexers above leave out.
+      */
+    def unavailableAt(node: CtrlLink, upTo: Int): Bool = sources.filter(_.availableAt > upTo)
       .map(source => node.down(source.sel)).reduceOption(_ || _).getOrElse(False)
 
     def consumerNeeds(destination: UInt): Bool =
-      (ex.down(Global.READS_RN) && ex.down(Global.RN_ADDR) === destination) ||
-      (ex.down(Global.READS_RM) && ex.down(Global.RM_ADDR) === destination) ||
-      (ex.down(Global.READS_RD) && ex.down(Global.RD_ADDR) === destination)
+      (rd.down(Global.READS_RN) && rd.down(Global.RN_ADDR) === destination) ||
+      (rd.down(Global.READS_RM) && rd.down(Global.RM_ADDR) === destination) ||
+      (rd.down(Global.READS_RD) && rd.down(Global.RD_ADDR) === destination)
 
-    def blockedBy(node: CtrlLink): Bool = {
+    def blockedBy(node: CtrlLink, upTo: Int): Bool = {
       val destination = node.down(Global.RD_ADDR)
-      node.isValid && lateAt(node) && node.down(Global.WRITES_RD) &&
+      val primary = unavailableAt(node, upTo) && node.down(Global.WRITES_RD) &&
         destination =/= 0 && consumerNeeds(destination)
+
+      // A second register this instruction has promised to write but has not
+      // reached yet. There is no value to forward and no stage at which one
+      // appears, so it blocks outright until the write is in flight.
+      val second = node.down(Global.WRITES_RM) && node.down(Global.RM_ADDR) =/= 0 &&
+        consumerNeeds(node.down(Global.RM_ADDR))
+
+      node.isValid && (primary || second)
     }
 
     // Guarded on the up nodes rather than the down ones, because halting
     // clears down.valid and reading it back here would close a loop.
     //
-    // With writeback forwarding of late results turned off, a consumer has to
-    // wait for the producer to commit, which is one cycle further.
-    val blocked = if (forwardLate) blockedBy(me) else blockedBy(me) || blockedBy(wb)
-    val interlock = ex.isValid && blocked
+    // Each stage is asked about the sources its own forwarding path cannot
+    // supply: an atomic in execute has not touched memory yet, a load in
+    // memory has not returned its data yet, and with writeback forwarding of
+    // those turned off a consumer has to wait for the producer to commit.
+    val blocked =
+      blockedBy(ex, Stages.EXECUTE) || blockedBy(me, Stages.MEMORY) ||
+        blockedBy(wb, forwardFromWriteback)
+    val interlock = rd.isValid && blocked
 
-    ex.haltWhen(interlock)
+    rd.haltWhen(interlock)
 
     // ---- debug -------------------------------------------------------------
     // A combinational peek at the committed file, for simulation and bring-up.
