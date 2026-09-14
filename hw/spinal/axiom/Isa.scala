@@ -61,6 +61,7 @@ object Isa {
   val CMP_R     = 0x0c // pd = rn cc rm
   val CMP_I     = 0x0d // pd = rn cc sext(imm12)
   val SEL       = 0x0e // rd = p ? rn : rm
+  val ALU_DIV   = 0x0f // rd = rn divided by rm, form in instr(8 downto 6)
 
   // -- memory -----------------------------------------------------------
   val LDB  = 0x10; val LDBU = 0x11
@@ -114,6 +115,35 @@ object Isa {
       MULH -> "mulh", MULHU -> "mulhu", ADDW -> "addw", SUBW -> "subw",
       MULW -> "mulw", SHLW -> "shlw", SHRW -> "shrw", SARW -> "sarw",
       RORW -> "rorw", MIN -> "min", MAX -> "max", MINU -> "minu", MAXU -> "maxu")
+  }
+
+  /** Divide and remainder, in instr(8 downto 6) of ALU_DIV.
+    *
+    * Divide does not share the ALU register form's sub-function field. Eight
+    * forms would not fit in the four codes left there, and dropping the
+    * 32-bit forms to make them fit would put every C `int` division behind a
+    * pair of shifts, which is the cost the W forms exist to avoid everywhere
+    * else.
+    *
+    * The encoding is regular in the way the rest of the map is: bit 0 selects
+    * unsigned, bit 1 selects the remainder rather than the quotient, and bit 2
+    * selects the 32-bit form.
+    */
+  object DivFn {
+    val DIV = 0; val DIVU = 1; val REM = 2; val REMU = 3
+    val DIVW = 4; val DIVUW = 5; val REMW = 6; val REMUW = 7
+
+    val WIDTH = 3
+
+    def unsigned(fn: Int): Boolean = (fn & 1) != 0
+    def remainder(fn: Int): Boolean = (fn & 2) != 0
+    def word(fn: Int): Boolean = (fn & 4) != 0
+
+    val ALL: Set[Int] = Set(DIV, DIVU, REM, REMU, DIVW, DIVUW, REMW, REMUW)
+
+    val NAMES: Map[Int, String] = Map(
+      DIV -> "div", DIVU -> "divu", REM -> "rem", REMU -> "remu",
+      DIVW -> "divw", DIVUW -> "divuw", REMW -> "remw", REMUW -> "remuw")
   }
 
   /** Shift-by-immediate sub-function, in instr(9 downto 7) of ALU_SHIFT. */
@@ -247,6 +277,7 @@ object Isa {
   def rm(instr: Int): Int = bits(instr, RM_HI, RM_LO)
 
   def aluFn(instr: Int): Int = bits(instr, 10, 6)
+  def divFn(instr: Int): Int = bits(instr, 8, 6)
   def shiftFn(instr: Int): Int = bits(instr, 9, 7)
   def shiftAmount(instr: Int): Int = bits(instr, 15, 10)
 
@@ -324,6 +355,62 @@ object Isa {
     val hi = (1 << width) - 1
     check(v >= lo && v <= hi, s"$what value $v does not fit in $width bits, $lo to $hi")
     v & ((1 << width) - 1)
+  }
+
+  /** The two results division has to define, and the reasoning for them.
+    *
+    * **Division by zero does not trap.** The quotient is all ones and the
+    * remainder is the dividend. Nothing else in this architecture traps on an
+    * arithmetic result — an addition that overflows does not — and making
+    * division the exception would buy a trap cause, a second way for an
+    * instruction to fail late, and an argument every compiler has to have with
+    * the hardware. All ones is the natural answer for the unsigned quotient,
+    * being where it tends as the divisor tends to zero, and taking the same
+    * bits for the signed one keeps the two forms from needing separate paths.
+    *
+    * **Signed overflow does not trap either.** The one case is the most
+    * negative value divided by minus one, whose true quotient is one larger
+    * than the format holds. The quotient is the dividend unchanged and the
+    * remainder is zero, which is the two's complement answer modulo 2^64 and
+    * so what every other overflowing operation here already returns.
+    *
+    * Both match RV64M, and the agreement is deliberate rather than
+    * coincidental. A compiler back end already knows these two cases and
+    * already knows not to guard them; choosing different answers would put a
+    * test in front of every division to buy nothing.
+    *
+    * One function, used by the assembler's tests, the reference model and the
+    * documentation, so that none of them can drift from the others.
+    */
+  def divide(fn: Int, rn: Long, rm: Long): Long = {
+    val isWord = DivFn.word(fn)
+    val isUnsigned = DivFn.unsigned(fn)
+    val wantRemainder = DivFn.remainder(fn)
+
+    def narrow(value: Long): Long =
+      if (!isWord) value
+      else if (isUnsigned) value & 0xffffffffL
+      else value.toInt.toLong
+
+    val a = narrow(rn)
+    val b = narrow(rm)
+    def widen(value: Long): Long = if (isWord) value.toInt.toLong else value
+
+    if (b == 0) widen(if (wantRemainder) a else -1L)
+    else if (isUnsigned) {
+      widen(if (wantRemainder) java.lang.Long.remainderUnsigned(a, b)
+            else java.lang.Long.divideUnsigned(a, b))
+    } else {
+      val mostNegative = if (isWord) Int.MinValue.toLong else Long.MinValue
+      if (a == mostNegative && b == -1L) widen(if (wantRemainder) 0L else a)
+      else widen(if (wantRemainder) a % b else a / b)
+    }
+  }
+
+  def encAluDiv(fn: Int, d: Int, n: Int, m: Int): Int = {
+    check(DivFn.ALL.contains(fn), f"no divide function 0x$fn%x")
+    (ALU_DIV << OP_LO) | (reg(d, "rd") << RD_LO) | (reg(n, "rn") << RN_LO) |
+      (reg(m, "rm") << RM_LO) | (fn << 6)
   }
 
   def encAluR(fn: Int, d: Int, n: Int, m: Int): Int = {
@@ -443,7 +530,7 @@ object Isa {
 
   val PRIMARY_OPCODES: Set[Int] = Set(
     ALU_R, ALU_SHIFT, ADDI, ANDI, ORI, XORI, SLTI, SLTUI,
-    MOVZ, MOVN, MOVK, ADDPC, CMP_R, CMP_I, SEL
+    MOVZ, MOVN, MOVK, ADDPC, CMP_R, CMP_I, SEL, ALU_DIV
   ) ++ LOADS ++ STORES ++ Set(LDP, STP, B, BL, BP, JALR, LD_ORD, ST_ORD, ATOMIC, FENCE, SYSTEM)
 
   /** Whether an instruction word is architecturally defined.
@@ -455,7 +542,8 @@ object Isa {
     val op = opcode(instr)
     if (!PRIMARY_OPCODES.contains(op)) return false
     op match {
-      case ALU_R  => Fn.ALL.contains(aluFn(instr))
+      case ALU_R   => Fn.ALL.contains(aluFn(instr))
+      case ALU_DIV => DivFn.ALL.contains(divFn(instr))
       case CMP_R  => Cc.ALL.contains(ccR(instr))
       case CMP_I  => Cc.ALL.contains(ccI(instr))
       case ATOMIC =>
@@ -508,6 +596,8 @@ object Isa {
     }
     op match {
       case ALU_R => s"${Fn.NAMES(aluFn(instr))} ${r(rd(instr))}, ${r(rn(instr))}, ${r(rm(instr))}"
+      case ALU_DIV =>
+        s"${DivFn.NAMES(divFn(instr))} ${r(rd(instr))}, ${r(rn(instr))}, ${r(rm(instr))}"
       case ALU_SHIFT => s"${ShiftFn.NAMES(shiftFn(instr))} ${r(rd(instr))}, ${r(rn(instr))}, ${shiftAmount(instr)}"
       case ADDI | ANDI | ORI | XORI | SLTI | SLTUI =>
         s"${MNEMONICS(op)} ${r(rd(instr))}, ${r(rn(instr))}, ${imm16s(instr)}"

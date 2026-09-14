@@ -325,6 +325,11 @@ class AxiomEmu(val memWords: Int = 4096, val resetVector: Long = 0) {
       // ADDPC reads the address of this instruction, not the next one.
       case Isa.ADDPC => write(rd, here + Isa.imm21(instr).toLong)
 
+      // The two interesting results, division by zero and signed overflow,
+      // are defined once in Isa.divide so that the model and the hardware
+      // cannot disagree about them by drifting apart.
+      case Isa.ALU_DIV => write(rd, Isa.divide(Isa.divFn(instr), read(rn), read(rm)))
+
       // -- compare and select -------------------------------------------
       case Isa.CMP_R => preds(Isa.pd(instr)) = compare(Isa.ccR(instr), read(rn), read(rm))
       case Isa.CMP_I => preds(Isa.pd(instr)) = compare(Isa.ccI(instr), read(rn), Isa.imm12(instr).toLong)

@@ -279,13 +279,13 @@ class AssemblerSpec extends AnyFunSuite {
   // =====================================================================
 
   test("exactly the documented opcodes and sub-functions are legal") {
-    // The prose in section 2.1 says thirty-nine slots are defined, but the
-    // table underneath it lists thirty-seven: fifteen arithmetic, seven loads,
-    // four stores, the two pair forms, four control transfers and five in the
-    // ordered and system group. The table is the encoding, so thirty-seven is
-    // the number checked here. The rest trap, so that adding an instruction
-    // later cannot change the meaning of an old binary.
-    assert(Isa.PRIMARY_OPCODES.size == 37)
+    // Thirty-eight slots: sixteen arithmetic, seven loads, four stores, the
+    // two pair forms, four control transfers and five in the ordered and
+    // system group. The rest trap, so that adding an instruction later cannot
+    // change the meaning of an old binary — which is exactly what divide did,
+    // taking the sixteenth arithmetic slot and turning a previously reserved
+    // opcode into a defined one.
+    assert(Isa.PRIMARY_OPCODES.size == 38)
     for (op <- 0 until 64 if !Isa.PRIMARY_OPCODES.contains(op))
       assert(!Isa.isLegal(op << Isa.OP_LO), f"reserved opcode 0x$op%02x must be illegal")
 
@@ -294,6 +294,12 @@ class AssemblerSpec extends AnyFunSuite {
         f"ALU function 0x$fn%02x legality")
     for (fn <- 0 until 8)
       assert(Isa.isLegal((Isa.ALU_SHIFT << Isa.OP_LO) | (fn << 7)), s"shift function $fn is defined")
+    // Divide uses three bits and defines all eight, so nothing inside the
+    // opcode is reserved; the check is that the field is read where the
+    // encoding says it is.
+    for (fn <- 0 until 8)
+      assert(Isa.isLegal((Isa.ALU_DIV << Isa.OP_LO) | (fn << 6)) == Isa.DivFn.ALL.contains(fn),
+        s"divide function $fn legality")
     for (cc <- 0 until 16) {
       assert(Isa.isLegal((Isa.CMP_R << Isa.OP_LO) | (cc << 7)) == Isa.Cc.ALL.contains(cc))
       assert(Isa.isLegal((Isa.CMP_I << Isa.OP_LO) | (cc << 12)) == Isa.Cc.ALL.contains(cc))
@@ -323,7 +329,7 @@ class AssemblerSpec extends AnyFunSuite {
     a.add(1, 2, 3); a.shli(1, 2, 3); a.addi(1, 2, -3); a.andi(1, 2, 3); a.ori(1, 2, 3)
     a.xori(1, 2, 3); a.slti(1, 2, 3); a.sltui(1, 2, 3)
     a.movz(1, 0x1234); a.movn(1, 0x1234, 1); a.movk(1, 0x1234, 3); a.addpc(1, 16)
-    a.cmpEq(0, 1, 2); a.cmpEqi(0, 1, 2); a.sel(1, 2, 3, 0)
+    a.cmpEq(0, 1, 2); a.cmpEqi(0, 1, 2); a.sel(1, 2, 3, 0); a.div(1, 2, 3)
     a.ldb(1, 2); a.ldbu(1, 2); a.ldh(1, 2); a.ldhu(1, 2); a.ldw(1, 2); a.ldwu(1, 2); a.ldd(1, 2)
     a.stb(1, 2); a.sth(1, 2); a.stw(1, 2); a.std(1, 2)
     a.ldp(1, 2, 3); a.stp(1, 2, 3)

@@ -69,6 +69,7 @@ class DecoderPlugin extends AxiomPlugin with DecoderService {
     val constOpcodes = Seq(Isa.MOVZ, Isa.MOVN, Isa.MOVK, Isa.ADDPC)
 
     node(Global.WRITES_RD) := opIs(aluOpcodes) || opIs(constOpcodes) || opIs(Isa.SEL) ||
+      opIs(Isa.ALU_DIV) ||
       opIs(Isa.LOADS) || opIs(Isa.LDP) || opIs(Isa.BL) || opIs(Isa.JALR) ||
       opIs(Isa.LD_ORD) || opIs(Isa.ATOMIC)
 
@@ -78,13 +79,13 @@ class DecoderPlugin extends AxiomPlugin with DecoderService {
 
     node(Global.WRITES_PD) := opIs(Isa.CMP_R) || opIs(Isa.CMP_I)
 
-    node(Global.READS_RN) := opIs(aluOpcodes) || opIs(Isa.CMP_R) || opIs(Isa.CMP_I) ||
+    node(Global.READS_RN) := opIs(aluOpcodes) || opIs(Isa.ALU_DIV) || opIs(Isa.CMP_R) || opIs(Isa.CMP_I) ||
       opIs(Isa.SEL) || opIs(Isa.LOADS) || opIs(Isa.STORES) || opIs(Isa.LDP) || opIs(Isa.STP) ||
       opIs(Isa.JALR) || opIs(Isa.LD_ORD) || opIs(Isa.ST_ORD) || opIs(Isa.ATOMIC)
 
     // The rm field is a source for three-operand arithmetic, for the second
     // register of a store pair, and for the operand of an atomic.
-    node(Global.READS_RM) := opIs(Isa.ALU_R) || opIs(Isa.CMP_R) || opIs(Isa.SEL) ||
+    node(Global.READS_RM) := opIs(Isa.ALU_R) || opIs(Isa.ALU_DIV) || opIs(Isa.CMP_R) || opIs(Isa.SEL) ||
       opIs(Isa.STP) || opIs(Isa.ATOMIC)
 
     // MOVK reads the register it also writes, and every store takes its data

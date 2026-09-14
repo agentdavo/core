@@ -115,6 +115,18 @@ class Assembler(val baseAddress: Long = 0) {
   def mul(rd: Int, rn: Int, rm: Int): Unit   = aluR(Isa.Fn.MUL, rd, rn, rm)
   def mulh(rd: Int, rn: Int, rm: Int): Unit  = aluR(Isa.Fn.MULH, rd, rn, rm)
   def mulhu(rd: Int, rn: Int, rm: Int): Unit = aluR(Isa.Fn.MULHU, rd, rn, rm)
+
+  // -- divide and remainder ----------------------------------------------
+  private def aluDiv(fn: Int, rd: Int, rn: Int, rm: Int): Unit =
+    word(Isa.encAluDiv(fn, rd, rn, rm))
+  def div(rd: Int, rn: Int, rm: Int): Unit    = aluDiv(Isa.DivFn.DIV, rd, rn, rm)
+  def divu(rd: Int, rn: Int, rm: Int): Unit   = aluDiv(Isa.DivFn.DIVU, rd, rn, rm)
+  def rem(rd: Int, rn: Int, rm: Int): Unit    = aluDiv(Isa.DivFn.REM, rd, rn, rm)
+  def remu(rd: Int, rn: Int, rm: Int): Unit   = aluDiv(Isa.DivFn.REMU, rd, rn, rm)
+  def divw(rd: Int, rn: Int, rm: Int): Unit   = aluDiv(Isa.DivFn.DIVW, rd, rn, rm)
+  def divuw(rd: Int, rn: Int, rm: Int): Unit  = aluDiv(Isa.DivFn.DIVUW, rd, rn, rm)
+  def remw(rd: Int, rn: Int, rm: Int): Unit   = aluDiv(Isa.DivFn.REMW, rd, rn, rm)
+  def remuw(rd: Int, rn: Int, rm: Int): Unit  = aluDiv(Isa.DivFn.REMUW, rd, rn, rm)
   def addw(rd: Int, rn: Int, rm: Int): Unit  = aluR(Isa.Fn.ADDW, rd, rn, rm)
   def subw(rd: Int, rn: Int, rm: Int): Unit  = aluR(Isa.Fn.SUBW, rd, rn, rm)
   def mulw(rd: Int, rn: Int, rm: Int): Unit  = aluR(Isa.Fn.MULW, rd, rn, rm)

@@ -514,6 +514,72 @@ later need.
 - the ASID recycling protocol, which is a correctness and security requirement
   rather than an optimisation
 
+## M7 Divide — done
+
+Divide and remainder, signed and unsigned, in full and 32-bit widths: eight
+forms under one opcode, with bit 0 selecting unsigned, bit 1 the remainder and
+bit 2 the 32-bit form.
+
+**It took a primary opcode rather than four of the ALU register form's
+remaining sub-function codes.** Eight forms do not fit in four codes, and
+dropping the 32-bit forms to make them fit would put every C `int` division
+behind a pair of shifts, which is the cost the W forms exist to avoid
+everywhere else.
+
+### The two results that are decisions rather than consequences
+
+**Division by zero does not trap.** The quotient is all ones and the remainder
+is the dividend. Nothing else in this architecture traps on an arithmetic
+result — an addition that overflows does not — and making division the
+exception buys a trap cause, a second way for an instruction to fail late, and
+an argument every compiler has to have with the hardware.
+
+**Signed overflow does not trap either.** The one case is the most negative
+value divided by minus one, whose true quotient is one larger than the format
+holds. The quotient is the dividend unchanged and the remainder is zero, which
+is the two's complement answer modulo 2^64 and so what every other overflowing
+operation here already returns.
+
+Both match RV64M deliberately. A compiler back end already knows these two
+cases and already knows not to guard them; choosing different answers would put
+a test in front of every division to buy nothing. They are defined once, in
+`Isa.divide`, which the reference model, the unit tests and the documentation
+all read, so none of them can drift from the others.
+
+### The divider
+
+Restoring, one bit per cycle, sixty-five cycles for any operands. Radix-4 or
+SRT would quarter or halve that and cost a quotient-digit selection table, a
+redundant representation and a much harder correctness argument; on a core that
+is routing bound and where division is rare, that is the wrong trade.
+
+Both operands are made non-negative on the way in and the signs applied on the
+way out, so there is one unsigned iteration rather than four signed ones. The
+remainder takes the sign of the dividend, which is what keeps
+`(a / b) * b + (a % b) == a` true for negative operands.
+
+**It holds the execute stage rather than declaring a late result.** This is the
+first unit in the core that cannot say when it will be finished, and it is why
+the stall protocol came first: no fixed number of stages would cover sixty-five
+cycles. Holding execute stops everything behind it, which is the honest cost of
+not building an out-of-order machine, and what it buys is that the result is
+ordinary — available in execute like an ALU result, forwarded the same way,
+with nothing else in the core needing to know that division is slow.
+
+### What the tests caught
+
+The divider is driven at its own ports before it goes near the pipeline, which
+is the lesson from the caches. What that left for the core-level tests were
+three things a component test cannot see: a plugin constructor that read a
+database parameter before the database was in scope, a decoder that did not
+know the new opcode writes a register and reads two, and the conformance tests
+correctly objecting that a reserved opcode had become defined.
+
+That last one is the check earning its keep. A reserved slot quietly becoming
+defined changes the meaning of a binary that relied on it trapping, so the
+count of reserved opcodes is asserted rather than assumed, and it went from
+twenty-seven to twenty-six here on purpose.
+
 ## M7 Divide
 
 Deliberately after M5. A multi-cycle divider needs the stall protocol, and

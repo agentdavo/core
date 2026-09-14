@@ -38,6 +38,14 @@ object AxiomParam {
     */
   val WITH_MULTIPLIER = Database.blocking[Boolean]()
 
+  /** When false, the divide opcode decodes as illegal.
+    *
+    * A divider is sixty-five cycles of iteration and a pair of wide registers,
+    * which is a real cost on a small part for an instruction some programs
+    * never execute.
+    */
+  val WITH_DIVIDER = Database.blocking[Boolean]()
+
   /** When false, the atomic opcodes decode as illegal. */
   val WITH_ATOMICS = Database.blocking[Boolean]()
 
@@ -110,6 +118,7 @@ object AxiomParam {
       memWords: Int = 4096,
       withMultiplier: Boolean = true,
       withAtomics: Boolean = true,
+      withDivider: Boolean = true,
       forwardLateFromWriteback: Boolean = true,
       forwardBase: Boolean = true,
       withDebugRegFilePort: Boolean = true,
@@ -129,6 +138,7 @@ object AxiomParam {
     MEM_WORDS.set(memWords)
     WITH_MULTIPLIER.set(withMultiplier)
     WITH_ATOMICS.set(withAtomics)
+    WITH_DIVIDER.set(withDivider)
     FORWARD_LATE_FROM_WRITEBACK.set(forwardLateFromWriteback)
     FORWARD_BASE.set(forwardBase)
     WITH_DEBUG_REGFILE_PORT.set(withDebugRegFilePort)

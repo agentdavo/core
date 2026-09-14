@@ -27,6 +27,7 @@ object AxiomProfile {
     new SelectPlugin,
     new BranchPlugin,
     new LsuPlugin,
+    new DividePlugin,
     new SystemPlugin,
     new TrapPlugin
   )
@@ -53,6 +54,7 @@ class AxiomCore(
     val resetVector: BigInt = 0,
     val withMultiplier: Boolean = true,
     val withAtomics: Boolean = true,
+    val withDivider: Boolean = true,
     val forwardLateFromWriteback: Boolean = true,
     val forwardBase: Boolean = true,
     val withDebugRegFilePort: Boolean = true,
@@ -71,7 +73,7 @@ class AxiomCore(
   val host = database on {
     // The memory size only matters to a memory plugin, and there is not one
     // here, but the key is blocking so it still has to be set.
-    AxiomParam.base(resetVector, 4096, withMultiplier, withAtomics, forwardLateFromWriteback,
+    AxiomParam.base(resetVector, 4096, withMultiplier, withAtomics, withDivider, forwardLateFromWriteback,
       forwardBase, withDebugRegFilePort, memoryStall, memoryLatency,
       icacheBytes, dcacheBytes, cacheLineBytes)
     val created = new PluginHost()
@@ -194,6 +196,7 @@ class AxiomSoc(
     val resetVector: BigInt = 0,
     val withMultiplier: Boolean = true,
     val withAtomics: Boolean = true,
+    val withDivider: Boolean = true,
     val forwardLateFromWriteback: Boolean = true,
     val forwardBase: Boolean = true,
     val withDebugRegFilePort: Boolean = true,
@@ -212,7 +215,7 @@ class AxiomSoc(
   val database = new Database
 
   val host = database on {
-    AxiomParam.base(resetVector, memWords, withMultiplier, withAtomics, forwardLateFromWriteback,
+    AxiomParam.base(resetVector, memWords, withMultiplier, withAtomics, withDivider, forwardLateFromWriteback,
       forwardBase, withDebugRegFilePort, memoryStall, memoryLatency,
       icacheBytes, dcacheBytes, cacheLineBytes)
     val created = new PluginHost()

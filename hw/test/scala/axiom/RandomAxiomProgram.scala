@@ -40,6 +40,23 @@ object RandomAxiomProgram {
     "maxu" -> (_.maxu(_, _, _))
   )
 
+  /** Divide and remainder, kept out of the general register pool and given
+    * their own weight.
+    *
+    * Every one of these is sixty-five cycles of stalled pipeline, so a mix
+    * that drew them as often as an add would spend the whole program dividing
+    * and test very little else. They are here to be interleaved with
+    * everything the stall could interact with, not to dominate.
+    *
+    * Divisors are drawn from the same pool as every other operand, so zero and
+    * minus one turn up on their own and the two defined special cases are
+    * reached without being asked for.
+    */
+  private val divideOps: Seq[Emit3] = Seq(
+    _.div(_, _, _), _.divu(_, _, _), _.rem(_, _, _), _.remu(_, _, _),
+    _.divw(_, _, _), _.divuw(_, _, _), _.remw(_, _, _), _.remuw(_, _, _)
+  )
+
   private val shiftOps: Seq[Emit3] = Seq(
     _.shli(_, _, _), _.shri(_, _, _), _.sari(_, _, _), _.rori(_, _, _),
     _.shlwi(_, _, _), _.shrwi(_, _, _), _.sarwi(_, _, _), _.rorwi(_, _, _)
@@ -121,7 +138,7 @@ object RandomAxiomProgram {
         Seq.fill(3 + memoryBias * 4)("mem") ++ Seq.fill(1 + memoryBias)("pair") ++
         Seq.fill(1 + memoryBias)("atomic") ++ Seq.fill(1)("ordered") ++
         Seq.fill(3)("branch") ++ Seq.fill(1)("jump") ++ Seq.fill(1)("call") ++
-        Seq.fill(1)("indirect") ++ Seq.fill(1)("pcrel") ++
+        Seq.fill(1)("indirect") ++ Seq.fill(1)("pcrel") ++ Seq.fill(1)("divide") ++
         Seq.fill(2 + memoryBias)("dependent")
 
     for (i <- 0 until groups) {
@@ -132,6 +149,9 @@ object RandomAxiomProgram {
       kinds(rng.nextInt(kinds.length)) match {
         case "reg" =>
           registerOps(rng.nextInt(registerOps.length))._2(asm, destReg(), anyReg(), anyReg())
+
+        case "divide" =>
+          divideOps(rng.nextInt(divideOps.length))(asm, destReg(), anyReg(), anyReg())
 
         case "shift" =>
           val which = rng.nextInt(shiftOps.length)

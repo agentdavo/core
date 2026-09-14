@@ -49,15 +49,23 @@ class AxiomTrapSpec extends AxiomSpec {
 
   test("every undefined primary opcode traps as ILLEGAL") {
     val undefined = (0 until 64).filterNot(Isa.PRIMARY_OPCODES.contains)
-    // Sixty-four slots, thirty-seven defined, so twenty-seven are reserved.
-    assert(undefined.length == 27, s"expected 27 reserved opcodes, found ${undefined.length}")
+    // Sixty-four slots, thirty-eight defined, so twenty-six are reserved.
+    // This number goes down every time an instruction is added, which is the
+    // point of checking it: a reserved slot that quietly became defined would
+    // change the meaning of a binary that relied on it trapping.
+    assert(undefined.length == 26, s"expected 26 reserved opcodes, found ${undefined.length}")
     for (op <- undefined) runIllegal(op << Isa.OP_LO, f"opcode 0x$op%02x")
   }
 
   test("an undefined opcode with non-zero operand fields still traps") {
     // The reserved check must look at the opcode, not at whether the rest of
     // the word happens to look like something.
-    for (op <- Seq(0x0f, 0x17, 0x1f, 0x2f, 0x3f)) {
+    // 0x0f was here until divide took it, which is why the list is checked
+    // against PRIMARY_OPCODES rather than trusted.
+    val reserved = Seq(0x17, 0x1e, 0x1f, 0x2f, 0x3f)
+    assert(reserved.forall(op => !Isa.PRIMARY_OPCODES.contains(op)),
+      "this test must use opcodes that are actually still reserved")
+    for (op <- reserved) {
       val instr = (op << Isa.OP_LO) | (7 << Isa.RD_LO) | (9 << Isa.RN_LO) | (11 << Isa.RM_LO) | 0x7ff
       runIllegal(instr, f"opcode 0x$op%02x with operands")
     }

@@ -129,6 +129,10 @@ object AxiomSim {
           icacheBytes = icache, dcacheBytes = dcache, cacheLineBytes = line,
           plugins = AxiomProfile.cached)))
 
+  lazy val socWithoutDivider: SimCompiled[AxiomSoc] =
+    config.workspaceName("AxiomSocNoDiv")
+      .compile(new AxiomSoc(memWords = MemWords, withDivider = false))
+
   /** Reset vector at 0x400 rather than 0. */
   val AltResetVector: Int = 0x400
   lazy val socAltReset: SimCompiled[AxiomSoc] =
