@@ -3,6 +3,7 @@ package axiom.plugins
 import axiom._
 import spinal.core._
 import spinal.lib._
+import spinal.lib.misc.pipeline._
 import scala.collection.mutable.ArrayBuffer
 
 /** Owns the program counter and arbitrates redirects.
@@ -25,11 +26,17 @@ class PcPlugin extends AxiomPlugin with PcService {
     port
   }
 
+  /** A Handle so a plugin may ask before this one has built. */
+  private val generation = spinal.core.fiber.Handle[UInt]()
+
+  override def generationOk(node: NodeApi): Bool = node(Global.FETCH_GEN) === generation.get
+
   val logic = during build new Area {
     val node = ctrl(Stages.FETCH)
 
     val pc  = Reg(UInt(AxiomParam.PC_WIDTH bits)) init AxiomParam.RESET_VECTOR.get
     val gen = Reg(UInt(2 bits)) init 0
+    generation.load(gen)
 
     // Fetch always has something to offer: there is always a next address.
     node.up.valid := True

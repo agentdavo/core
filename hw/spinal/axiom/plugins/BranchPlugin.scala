@@ -47,10 +47,24 @@ class BranchPlugin extends AxiomPlugin {
       val opcode = node(Global.INSTRUCTION)(Isa.OP_HI downto Isa.OP_LO)
       val isRelative = opcode === B(Isa.B, 6 bits) || opcode === B(Isa.BL, 6 bits)
 
-      // isFiring, not isValid: a branch held in decode must redirect on the
-      // cycle it leaves, not on every cycle it waits, or it would bump the
-      // fetch generation repeatedly and discard its own target fetch.
-      earlyRedirect.valid := node.down.isFiring && node(SEL) && isRelative
+      // The upstream side, plus the generation compare on its own, rather
+      // than the downstream side.
+      //
+      // Firing matters: a branch held in decode must redirect on the cycle it
+      // leaves, not on every cycle it waits, or it would bump the fetch
+      // generation repeatedly and discard its own target fetch. Backpressure
+      // is what decides that, and the upstream side carries it.
+      //
+      // What the downstream side adds is every reason the stage might be
+      // cancelled, and that is what made this the critical path: it chained
+      // the trap decode, the execute redirect and the whole arbitration
+      // network into the fetch generation register. Of those reasons only a
+      // stale generation changes the answer, so it is asked for directly. A
+      // branch cancelled for any other reason may still redirect: an execute
+      // redirect is the one that cancels it, it is applied after this one and
+      // so wins the program counter, and the generation moves once either way.
+      earlyRedirect.valid := node.up.isFiring && node(SEL) && isRelative &&
+        host[PcService].generationOk(node.up)
       earlyRedirect.payload := node(Global.PC) + node(Global.BRANCH_OFF)
     }
 
@@ -77,11 +91,16 @@ class BranchPlugin extends AxiomPlugin {
     val computed = node(Global.RS_N).asUInt + node(Global.IMM).asUInt
     val indirectTarget = computed(AxiomParam.PC_WIDTH.get - 1 downto 2) @@ U"00"
 
-    // Gated on the branch actually leaving execute, not merely sitting there
-    // valid. A branch held by downstream backpressure would otherwise redirect
-    // on every cycle it waits, bumping the fetch generation repeatedly and
-    // discarding the target fetch more than once.
-    redirect.valid := node.down.isFiring && node(SEL) && taken
+    // The upstream side again, and for the same reason. The downstream side
+    // here carried the trap decode: a trap thrown in this stage clears it, so
+    // reading it put seven nanoseconds of cause decoding in front of the
+    // redirect. No branch raises a trap, so that term could never change the
+    // answer; it only had to be computed.
+    //
+    // Backpressure is still respected, because a branch held by a stalled
+    // memory stage does not fire upstream either, and would otherwise bump the
+    // fetch generation on every cycle it waits.
+    redirect.valid := node.up.isFiring && node(SEL) && taken
     redirect.payload := Mux(isIndirect, indirectTarget, relativeTarget)
 
     node(RESULT) := (node(Global.PC) + 4).asBits

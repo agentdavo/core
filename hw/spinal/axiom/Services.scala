@@ -39,6 +39,17 @@ trait PcService {
     * because the deeper instruction is the older one.
     */
   def newRedirect(from: Int): Flow[UInt]
+
+  /** Was the instruction arriving at this node fetched under the current
+    * generation?
+    *
+    * Decode already throws stale instructions, so a plugin that only needs to
+    * know whether an instruction is real can read the throw's effect on the
+    * stage's validity instead. A plugin that must not have its own answer
+    * depend on every other reason a stage might be cancelled asks here, and
+    * gets the generation compare on its own.
+    */
+  def generationOk(node: NodeApi): Bool
 }
 
 /** The general register file.
