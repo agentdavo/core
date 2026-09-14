@@ -120,6 +120,10 @@ class DecoderPlugin extends AxiomPlugin with DecoderService {
       is(B(Isa.LDW, 6 bits), B(Isa.LDWU, 6 bits), B(Isa.STW, 6 bits)) { imm := scaled(imm14, Isa.SIZE_W) }
       is(B(Isa.LDD, 6 bits), B(Isa.STD, 6 bits)) { imm := scaled(imm14, Isa.SIZE_D) }
       is(B(Isa.LDP, 6 bits), B(Isa.STP, 6 bits)) { imm := scaled(imm9, 3) }
+      // A shift amount is an immediate like any other. Carrying it here rather
+      // than slicing it out again in the ALU is what lets the ALU pick its
+      // second operand with one select instead of an opcode-wide multiplexer.
+      is(B(Isa.ALU_SHIFT, 6 bits)) { imm := instr(15 downto 10).resize(AxiomParam.XLEN.get) }
     }
     node(Global.IMM) := imm
 

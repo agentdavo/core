@@ -24,6 +24,17 @@ class AluPlugin extends AxiomPlugin {
   val SEL_ALU = Payload(Bool())
   val RESULT  = Payload(Bits(AxiomParam.XLEN bits))
 
+  /** The function code and the second-operand select, both resolved in decode.
+    *
+    * Neither depends on a register value, only on the instruction, so neither
+    * belongs in the stage that has to wait for the register file. Leaving them
+    * in execute put a seven-way sixty-four-bit multiplexer and a five-bit
+    * opcode remap in front of the ALU, in series with the function decode of
+    * the result multiplexer behind it. Decode is otherwise close to idle.
+    */
+  val FN      = Payload(UInt(5 bits))
+  val USE_IMM = Payload(Bool())
+
   /** A multiply, which does not.
     *
     * A 64 by 64 multiply is sixteen DSP blocks and a four-level adder tree, and
@@ -80,13 +91,43 @@ class AluPlugin extends AxiomPlugin {
     val xlen = AxiomParam.XLEN.get
     val half = xlen / 2
 
-    // Split the claim at decode, early enough for the register file interlock
+    // ---- decode: everything that depends only on the instruction --------
+    //
+    // Split the claim here too, early enough for the register file interlock
     // to see that a multiply is a late producer.
     val classify = new Area {
       val decode = ctrl(Stages.DECODE)
-      val multiply = if (AxiomParam.WITH_MULTIPLIER.get) isMultiply(decode(Global.INSTRUCTION)) else False
+      val instr = decode(Global.INSTRUCTION)
+      val opcode = instr(Isa.OP_HI downto Isa.OP_LO)
+
+      val multiply = if (AxiomParam.WITH_MULTIPLIER.get) isMultiply(instr) else False
       decode(SEL_MUL) := decode(SEL) && multiply
       decode(SEL_ALU) := decode(SEL) && !multiply
+
+      val shiftSub = instr(9 downto 7).asUInt
+      // SHL to ROR are contiguous at 0x08 and their W forms at 0x14, so the
+      // three-bit shift sub-function maps to the five-bit ALU code by adding a
+      // constant that depends only on its top bit.
+      val shiftFn = Mux(shiftSub.msb, U(0x10, 5 bits) + shiftSub.resize(5), U(0x08, 5 bits) + shiftSub.resize(5))
+
+      // The register form feeds its sub-function straight through, which is
+      // what the opcode map was laid out for.
+      val fn = UInt(5 bits)
+      val useImm = False
+      fn := instr(10 downto 6).asUInt
+      switch(opcode) {
+        // The shift amount rides in the shared immediate, so the second
+        // operand is one select here rather than two.
+        is(B(Isa.ALU_SHIFT, 6 bits)) { fn := shiftFn;     useImm := True }
+        is(B(Isa.ADDI, 6 bits))      { fn := Isa.Fn.ADD;  useImm := True }
+        is(B(Isa.ANDI, 6 bits))      { fn := Isa.Fn.AND;  useImm := True }
+        is(B(Isa.ORI, 6 bits))       { fn := Isa.Fn.OR;   useImm := True }
+        is(B(Isa.XORI, 6 bits))      { fn := Isa.Fn.XOR;  useImm := True }
+        is(B(Isa.SLTI, 6 bits))      { fn := Isa.Fn.SLT;  useImm := True }
+        is(B(Isa.SLTUI, 6 bits))     { fn := Isa.Fn.SLTU; useImm := True }
+      }
+      decode(FN) := fn
+      decode(USE_IMM) := useImm
     }
 
     val node = ctrl(Stages.EXECUTE)
@@ -97,29 +138,8 @@ class AluPlugin extends AxiomPlugin {
 
     def opIs(value: Int): Bool = opcode === B(value, 6 bits)
 
-    // ---- pick the function and the second operand ----------------------
-    val shiftSub = instr(9 downto 7).asUInt
-    // SHL to ROR are contiguous at 0x08 and their W forms at 0x14, so the
-    // three-bit shift sub-function maps to the five-bit ALU code by adding a
-    // constant that depends only on its top bit.
-    val shiftFn = Mux(shiftSub.msb, U(0x10, 5 bits) + shiftSub.resize(5), U(0x08, 5 bits) + shiftSub.resize(5))
-
-    val fn = UInt(5 bits)
-    val srcB = Bits(xlen bits)
-    fn := instr(10 downto 6).asUInt
-    srcB := node(Global.RS_M)
-    switch(opcode) {
-      is(B(Isa.ALU_SHIFT, 6 bits)) {
-        fn := shiftFn
-        srcB := instr(15 downto 10).resize(xlen)
-      }
-      is(B(Isa.ADDI, 6 bits))  { fn := Isa.Fn.ADD;  srcB := imm }
-      is(B(Isa.ANDI, 6 bits))  { fn := Isa.Fn.AND;  srcB := imm }
-      is(B(Isa.ORI, 6 bits))   { fn := Isa.Fn.OR;   srcB := imm }
-      is(B(Isa.XORI, 6 bits))  { fn := Isa.Fn.XOR;  srcB := imm }
-      is(B(Isa.SLTI, 6 bits))  { fn := Isa.Fn.SLT;  srcB := imm }
-      is(B(Isa.SLTUI, 6 bits)) { fn := Isa.Fn.SLTU; srcB := imm }
-    }
+    val fn = node(FN)
+    val srcB = Mux(node(USE_IMM), imm, node(Global.RS_M))
 
     // ---- the datapath ---------------------------------------------------
     val a = node(Global.RS_N)

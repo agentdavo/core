@@ -114,6 +114,9 @@ estimated, one change at a time.
 | 2 | one funnel shifter instead of eight, naming fixes | 12,999 | |
 | 3 | multiply split across execute and memory | 12,817 | 28.60 |
 | 4 | predicate false path removed, one-hot multiplexers | 14,530 | 29.79 |
+| 5 | bare core rather than the SoC, one-hot reverted | 12,861 | 34.69 |
+| 6 | register read given its own stage | 12,173 | 41.50 |
+| 7 | unconditional branches folded in decode, multiplier operands direct | 12,285 | 42.00 |
 
 **Step 1** was the big one. Thirty-two 64-bit registers in flip-flops with three
 asynchronous read ports become three 32-to-1 multiplexers 64 bits wide, which
@@ -143,6 +146,35 @@ The one-hot multiplexers in the same step did not pay: 13 per cent more area for
 4 per cent more frequency, because yosys did not merge the mask and OR pairs as
 hoped. Measured and kept only where the depth is on the critical path.
 
+**Step 6** is the one that needed a pipeline change rather than tidying. With
+the register read, the forwarding network and the ALU all in execute, the path
+ran distributed RAM output, forwarding multiplexer, ALU, result multiplexer in
+series. Splitting the read into its own stage gives each half roughly half the
+path. The read and the forwarding move together: correcting a captured operand
+in a later stage is the bug described above, not an option.
+
+On its own the split was a wash. The clock went up by 19.6 per cent and the
+demo program went from 233 cycles to 275, an 18 per cent loss, because the
+extra stage costs a cycle of branch shadow and a cycle of load-use interlock.
+
+**Step 7** paid for it. An unconditional relative branch has its target in
+decode — program counter plus displacement, no register involved — so it
+redirects from there and kills one instruction instead of three. That brought
+the demo back to 235 cycles, two more than the five-stage core, at a fifth more
+clock: about 20 per cent more work per second overall.
+
+Making the split correct also required two things the shallower pipeline had
+been hiding, both of which are described in the microarchitecture document: a
+producer's result does not necessarily exist in the stage the producer sits in,
+and a load pair cannot name its second destination until its second memory pass
+exists. Both were found by randomized co-simulation within minutes of the split
+compiling, which is the return on having built the reference model first.
+
+The critical path is now 87 per cent inside the ALU, in its second-operand and
+result multiplexers, with the register file down to 7 per cent. That is a
+better problem to have than the one in step 0, and it is the next thing to
+attack.
+
 ### The remaining path, and a parameter instead of an argument
 
 After step 4 the path is a block RAM read feeding the multiplier's partial
@@ -171,10 +203,16 @@ and both settings are measured rather than argued about.
 
 The floor for a 64-bit core on this part is the adder. A 64-bit carry chain on
 an ECP5 is around thirty CCU2C in series, so a single-cycle 64-bit add is most
-of a 10 ns cycle on its own. Reaching 100 MHz means the ALU gets a stage to
-itself and nothing else shares it, which is a pipeline split rather than the
-tidying done so far. That is why the next milestone is the memory protocol and
-not more of this.
+of a 10 ns cycle on its own. Everything above the adder in the execute stage is
+multiplexing, and that is what the remaining 87 per cent is: a function-wide
+result multiplexer with nineteen inputs, and constant formation sharing it.
+Moving what depends only on the instruction into decode is the cheap half of
+that, and moving the adder into a stage where nothing else shares it is the
+expensive half.
+
+Reaching 100 MHz means the second one, which is another pipeline split rather
+than tidying, and it should wait: a deeper pipeline changes what the memory
+protocol has to tolerate, so the protocol comes first.
 
 ## M5 Stallable memory — next
 
