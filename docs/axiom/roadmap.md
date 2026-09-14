@@ -431,36 +431,58 @@ honest statement is that line size is the one parameter here whose measurement
 is an artefact of the memory model, and it should be re-measured against a
 bursting one before anybody picks a number from this table.
 
-### What they cost
+### What they cost, and a lesson about believing the first number
 
 The same system with and without them, on an LFE5U-45F. Single seeds, so the
-frequencies are all inside the noise band and none of the differences between
-them is a result; what matters here is the area.
+frequencies are inside the noise band and none of the differences between them
+is a result; the area is the point.
 
-| | LUT4 | DP16KD | Distributed RAM | fmax |
-| --- | --- | --- | --- | --- |
-| no caches | 9,732 | 48 | 192 | 44.1 |
-| 4 kB + 4 kB | 11,381 | 64 | 192 | 43.0 |
-| 1 kB + 4 kB | 11,547 | 56 | 332 | 41.5 |
+The first measurement said the caches cost sixteen block RAMs where the
+arithmetic said four, and the explanation written down for it was that a
+sixty-four bit word with byte enables cannot pack densely. That was true about
+the part and wrong about the design, because nothing had asked whether the
+design needed byte enables. Three things did not:
 
-**The caches are off the critical path.** The core is routing bound at sixty-two
-per cent routing on the same front it was before, and adding two caches to it
-did not move that. Whatever is limiting this design, memory is not it.
+| | LUT4 | DP16KD | Distributed RAM |
+| --- | --- | --- | --- |
+| no caches, as first written | 9,732 | 48 | 192 |
+| no caches, after | 9,734 | **32** | 192 |
+| 4 kB + 4 kB, as first written | 11,381 | 64 | 192 |
+| 4 kB + 4 kB, after | 11,494 | **36** | 208 |
 
-**Block RAM costs more than the arithmetic says.** Eight kilobytes of cache is
-sixty-four kilobits, which is four DP16KD, and it takes sixteen. A sixty-four
-bit word with byte enables maps as eight nine-bit slices rather than packing
-densely, so the write granularity the data cache needs costs four times the
-memory the data does.
+**A third read port replicates the whole array.** The debug access had its own
+port on the memory behind, which reads better and costs three times the memory:
+an ECP5 block RAM has two ports, so a third read makes yosys build three
+copies. Sharing it with a channel that is idle whenever the debug access is
+active costs nothing and saves sixteen.
 
-**The recommended geometry trades one resource for another rather than being
-free.** Dropping the instruction cache from four kilobytes to one saves eight
-block RAMs, which is half of what the caches cost, and it measured identically
-on both workloads. But yosys puts the smaller array in distributed RAM instead,
-so it costs a hundred and forty more of those and a little more logic. On a
-part where block RAM is the scarce resource that is a good trade and on one
-where it is not it is a wash, which is the sort of thing worth knowing before
-choosing rather than after.
+**A mask that is a signal is byte enables even when it is always all ones.**
+The instruction cache only ever writes whole refill words, but it went through
+the same masked write as the data cache, so it was mapped as nine-bit slices
+for a granularity it never used.
+
+**The data cache needs sub-word writes and not byte enables.** Every command
+already reads the array on the cycle it is accepted, a store included, and the
+lookup cycle is one later, so the old word is on hand and the store can be
+merged and written full width. Nothing can have touched it in between, because
+a store already refuses the next command for exactly that cycle.
+
+Between them the cached system went from sixty-four block RAMs to thirty-six,
+and the caches themselves from sixteen to four. Nothing about the part changed.
+
+**It also withdrew a recommendation.** The sizing sweep said to spend the
+budget on the data cache, and the area measurement appeared to agree: one
+kilobyte of instruction cache with four of data saved eight block RAMs over
+four and four. After the fixes both cost thirty-six, because the saving had
+been the instruction cache's unnecessary byte enables rather than its size.
+The sizing result stands — the data cache is what the workload needs — but
+there is no longer an area reason to shrink the instruction cache.
+
+The general lesson is worth more than the twenty-eight block RAMs. A synthesis
+number is a measurement of the design *as written*, and the first explanation
+that fits it will usually be about the part, because that is the part of the
+system that feels fixed. It is worth asking what the RTL asked for before
+concluding anything about what the silicon can do.
 
 ### Three bugs, all needing a memory that answers late
 
