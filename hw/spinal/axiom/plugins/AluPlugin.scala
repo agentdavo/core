@@ -2,6 +2,7 @@ package axiom.plugins
 
 import axiom._
 import spinal.core._
+import spinal.lib._
 import spinal.lib.misc.pipeline._
 
 /** The integer ALU, the immediate forms, and constant formation.
@@ -74,6 +75,30 @@ class AluPlugin extends AxiomPlugin {
     * five-way multiplexer over five units, and each unit resolves its own
     * variant from bits it already has.
     */
+  /** A shift, which finishes a stage later than the rest of the ALU.
+    *
+    * The funnel shifter is seven multiplexer levels of sixty-four bits, which
+    * is comparable to the 64-bit adder beside it and shares the stage with it.
+    * Splitting it in half across execute and memory makes each half three or
+    * four levels, and takes the deeper of the two off the stage that every
+    * instruction goes through.
+    *
+    * Shifts pay a cycle for that, in the same way a load or a multiply does,
+    * and through the same mechanism: the result is declared as arriving in
+    * memory and the interlock holds a consumer that reaches for it sooner. It
+    * is the right operation to spend that on, being far rarer in ordinary code
+    * than an add and no more common than a load.
+    */
+  val SEL_SHIFT    = Payload(Bool())
+  val SHIFT_RESULT = Payload(Bits(AxiomParam.XLEN bits))
+
+  /** The funnel shift, half done: shifted by whole groups of sixteen, with the
+    * remainder of the distance still to go. Seventy-nine bits is what a
+    * sixty-four bit answer needs when it may still move fifteen more places.
+    */
+  val SHIFT_COARSE = Payload(Bits(Isa.XLEN + 15 bits))
+  val SHIFT_FINE   = Payload(UInt(4 bits))
+
   val KLASS        = Payload(UInt(3 bits))
   val IS_WORD      = Payload(Bool())
   val SUBTRACT     = Payload(Bool())
@@ -106,11 +131,27 @@ class AluPlugin extends AxiomPlugin {
   val SEL_MUL    = Payload(Bool())
   val MUL_RESULT = Payload(Bits(AxiomParam.XLEN bits))
 
-  /** The four partial products, registered between execute and memory. */
-  val PP_HH = Payload(SInt(2 * (Isa.XLEN / 2 + 1) bits))
-  val PP_HL = Payload(SInt(2 * (Isa.XLEN / 2 + 1) bits))
-  val PP_LH = Payload(SInt(2 * (Isa.XLEN / 2 + 1) bits))
-  val PP_LL = Payload(SInt(2 * (Isa.XLEN / 2 + 1) bits))
+  /** Partial products, registered between execute and memory, one per pair of
+    * operand limbs.
+    *
+    * The limb width is the whole point. An ECP5 MULT18X18D multiplies 18 bits
+    * by 18 bits in one cell. Ask for anything wider and yosys decomposes it
+    * into a cascade of cells with adders between them, so a 33 by 33 product
+    * is four cells deep: measured at 3.9 ns inside the DSP and another 2.6 ns
+    * routing between its halves, which was the critical path of the core.
+    *
+    * Sixteen bits of operand plus a sign bit is seventeen, which fits one cell
+    * with a bit to spare, so every product here is a single DSP and nothing
+    * cascades. The same sixteen cells do the work, arranged to suit the part
+    * rather than to suit the arithmetic.
+    */
+  val LimbBits = 16
+  val Limbs = Isa.XLEN / LimbBits
+  val ProductBits = 2 * (LimbBits + 1)
+
+  val PP: Array[Array[Payload[SInt]]] = Array.tabulate(Limbs, Limbs) { (i, j) =>
+    Payload(SInt(ProductBits bits)).setName(s"PP_${i}_$j")
+  }
 
   private val opcodes = Seq(Isa.ALU_R, Isa.ALU_SHIFT, Isa.ADDI, Isa.ANDI, Isa.ORI,
     Isa.XORI, Isa.SLTI, Isa.SLTUI, Isa.MOVZ, Isa.MOVN, Isa.MOVK, Isa.ADDPC)
@@ -139,6 +180,7 @@ class AluPlugin extends AxiomPlugin {
   val setupLogic = during setup new Area {
     host[DecoderService].claim(SEL, opcodes, subFunctionLegal)
     host[RegFileService].addResult(SEL_ALU, RESULT)
+    host[RegFileService].addResult(SEL_SHIFT, SHIFT_RESULT, availableAt = Stages.MEMORY)
     if (AxiomParam.WITH_MULTIPLIER.get) {
       host[RegFileService].addResult(SEL_MUL, MUL_RESULT, availableAt = Stages.WRITEBACK)
     }
@@ -159,7 +201,6 @@ class AluPlugin extends AxiomPlugin {
 
       val multiply = if (AxiomParam.WITH_MULTIPLIER.get) isMultiply(instr) else False
       decode(SEL_MUL) := decode(SEL) && multiply
-      decode(SEL_ALU) := decode(SEL) && !multiply
 
       val shiftSub = instr(9 downto 7).asUInt
       // SHL to ROR are contiguous at 0x08 and their W forms at 0x14, so the
@@ -201,6 +242,15 @@ class AluPlugin extends AxiomPlugin {
       when(fnIs(Isa.Fn.MIN, Isa.Fn.MAX, Isa.Fn.MINU, Isa.Fn.MAXU)) { klass := AluKlass.MINMAX }
       decode(KLASS) := klass
 
+      // Constant formation borrows the same instruction bits the function code
+      // lives in, so a MOVZ whose immediate happens to look like a shift must
+      // not be routed to the shifter. The three claims are exclusive.
+      val isConst = opcode === B(Isa.MOVZ, 6 bits) || opcode === B(Isa.MOVN, 6 bits) ||
+        opcode === B(Isa.MOVK, 6 bits) || opcode === B(Isa.ADDPC, 6 bits)
+      val shift = !isConst && klass === AluKlass.SHIFT
+      decode(SEL_SHIFT) := decode(SEL) && !multiply && shift
+      decode(SEL_ALU) := decode(SEL) && !multiply && !shift
+
       decode(IS_WORD) := fnIs(Isa.Fn.ADDW, Isa.Fn.SUBW,
         Isa.Fn.SHLW, Isa.Fn.SHRW, Isa.Fn.SARW, Isa.Fn.RORW)
 
@@ -222,8 +272,7 @@ class AluPlugin extends AxiomPlugin {
 
       val isMovk = opcode === B(Isa.MOVK, 6 bits)
       decode(IS_MOVK) := isMovk
-      decode(SEL_CONST) := opcode === B(Isa.MOVZ, 6 bits) || opcode === B(Isa.MOVN, 6 bits) ||
-        isMovk || opcode === B(Isa.ADDPC, 6 bits)
+      decode(SEL_CONST) := isConst
 
       val constValue = Bits(xlen bits)
       constValue := movShifted
@@ -301,14 +350,22 @@ class AluPlugin extends AxiomPlugin {
       }
     }
 
-    /** One funnel shifter for all eight shift and rotate functions.
+    /** One funnel shifter for all eight shift and rotate functions, cut in
+      * half across execute and memory.
       *
       * The construction is `{hi, lo} >> amount`, keeping the low half.
       * Choosing what goes in `hi` and `lo` turns that single right shift into
       * a left shift, an arithmetic shift or a rotate, and placing a 32-bit
       * operand in the correct half of `lo` covers the W forms too. Eight
       * separate shifters became one, which is worth roughly a quarter of this
-      * plugin's area and removes seven inputs from the result multiplexer.
+      * plugin's area.
+      *
+      * A 128-bit shift by a seven-bit distance is seven multiplexer levels,
+      * which is as deep as the adder it shares the stage with. Execute does
+      * the top three bits of the distance, moving whole groups of sixteen, and
+      * memory does the remaining four. Between them sits a value that has
+      * settled to within fifteen places of its answer, so seventy-nine bits
+      * carry it rather than a hundred and twenty-eight.
       */
     val shifter = new Area {
       val wide = b(5 downto 0).asUInt
@@ -334,7 +391,18 @@ class AluPlugin extends AxiomPlugin {
         is(Isa.Fn.RORW) { lo := low32 ## low32; amount := narrow.resized }
       }
 
-      val result = ((hi ## lo).asUInt >> amount)(xlen - 1 downto 0).asBits
+      // Three levels here: the distance is a multiple of sixteen, so this is
+      // three multiplexers of sixteen, thirty-two and sixty-four places.
+      val coarse = ((hi ## lo).asUInt >> (amount(6 downto 4) @@ U"0000"))
+      node(SHIFT_COARSE) := coarse(AxiomParam.XLEN.get + 14 downto 0).asBits
+      node(SHIFT_FINE) := amount(3 downto 0)
+    }
+
+    /** The other four levels, and the W narrowing that goes with them. */
+    val shiftComplete = new Area {
+      val memory = ctrl(Stages.MEMORY)
+      val fine = (memory(SHIFT_COARSE).asUInt >> memory(SHIFT_FINE))(xlen - 1 downto 0).asBits
+      memory(SHIFT_RESULT) := Mux(memory(IS_WORD), fine(31 downto 0).asSInt.resize(xlen).asBits, fine)
     }
 
     /** Partial products, computed in execute.
@@ -357,13 +425,24 @@ class AluPlugin extends AxiomPlugin {
       val mulB = node(Global.RS_M)
       val signedOp = instr(10 downto 6).asUInt === Isa.Fn.MULH
 
-      def high(value: Bits) = ((signedOp && value(xlen - 1)) ## value(xlen - 1 downto half)).asSInt
-      def low(value: Bits) = (False ## value(half - 1 downto 0)).asSInt
+      /** One limb, as a seventeen-bit signed value.
+        *
+        * Only the top limb carries a sign, and only when the function is the
+        * signed high multiply, so one multiplexer covers all four multiply
+        * functions exactly as a single wide multiplier did. The lower limbs
+        * are non-negative by construction, which is what makes the sum of the
+        * products correct for both signednesses.
+        */
+      def limb(value: Bits, i: Int): SInt = {
+        val top = i == Limbs - 1
+        val sign = if (top) signedOp && value(xlen - 1) else False
+        (sign ## value(LimbBits * i + LimbBits - 1 downto LimbBits * i)).asSInt
+      }
 
-      node(PP_HH) := high(mulA) * high(mulB)
-      node(PP_HL) := high(mulA) * low(mulB)
-      node(PP_LH) := low(mulA) * high(mulB)
-      node(PP_LL) := low(mulA) * low(mulB)
+      val limbsA = Array.tabulate(Limbs)(limb(mulA, _))
+      val limbsB = Array.tabulate(Limbs)(limb(mulB, _))
+
+      for (i <- 0 until Limbs; j <- 0 until Limbs) node(PP(i)(j)) := limbsA(i) * limbsB(j)
     }
 
     /** Five units, one multiplexer, and the W narrowing applied once.
@@ -375,11 +454,12 @@ class AluPlugin extends AxiomPlugin {
       */
     val minmax = Mux(adder.less ^ fn(0), a, b)
 
+    // No shift input: it finishes in memory and arrives through its own
+    // result, so the stage every instruction goes through does not carry it.
     val wide = Bits(xlen bits)
     wide := adder.difference
     switch(node(KLASS)) {
       is(AluKlass.LOGIC)  { wide := logicUnit.result }
-      is(AluKlass.SHIFT)  { wide := shifter.result }
       is(AluKlass.FLAG)   { wide := adder.less.asBits.resize(xlen) }
       is(AluKlass.MINMAX) { wide := minmax }
     }
@@ -406,18 +486,21 @@ class AluPlugin extends AxiomPlugin {
 
     /** Sum the partial products in the memory stage.
       *
-      * The four products were registered on the way in, so this side of the
-      * multiply is an adder tree and nothing else, and the result is registered
-      * again on the way to writeback.
+      * Every product was registered on the way in, so this side of the
+      * multiply is an adder tree and nothing else, and the result is
+      * registered again on the way to writeback. A product of limbs i and j
+      * carries weight 16 times i plus j; sign extending each to the full
+      * double width before shifting makes the sum correct in two's complement
+      * for both signednesses, and the terms that fall off the top cancel
+      * modulo 2^128 exactly as they should.
       */
     val multiplyComplete = AxiomParam.WITH_MULTIPLIER.get generate new Area {
       val memory = ctrl(Stages.MEMORY)
       val wide = 2 * xlen
 
-      val product = memory(PP_LL).resize(wide) +
-        (memory(PP_HL).resize(wide) << half) +
-        (memory(PP_LH).resize(wide) << half) +
-        (memory(PP_HH).resize(wide) << xlen)
+      val terms = for (i <- 0 until Limbs; j <- 0 until Limbs)
+        yield memory(PP(i)(j)).resize(wide) |<< (LimbBits * (i + j))
+      val product = terms.toSeq.reduceBalancedTree(_ + _)
 
       val instr = memory(Global.INSTRUCTION)
       val fn = instr(10 downto 6).asUInt
