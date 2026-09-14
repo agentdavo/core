@@ -175,6 +175,60 @@ result multiplexers, with the register file down to 7 per cent. That is a
 better problem to have than the one in step 0, and it is the next thing to
 attack.
 
+### Chasing frequency, and what did not work
+
+Steps 0 to 7 were logic: find the deep thing, make it shallower. Past step 7
+that stopped working, and the reason is worth writing down, because it changes
+what is worth trying next.
+
+At step 7 the critical path was 7.7 ns of logic and 11.1 ns of routing. **The
+core is routing bound, not logic bound.** Driving the logic to zero would still
+leave it at about 90 MHz, so removing multiplexer levels does nothing: the cost
+is the wire between the levels, not the levels.
+
+What makes the wires long is the bypass network. Three read ports, sixty-four
+bits, six sources each means every producer's result has to reach roughly two
+hundred multiplexer inputs, and those inputs are wherever the placer put them.
+
+Everything below is the bare core at a 200 MHz target on an LFE5U-45F, so the
+placer works toward a target it cannot reach rather than stopping early. Seed
+noise measured at plus or minus three per cent over three seeds, so anything
+inside that band is not a result.
+
+| Change | fmax | Verdict |
+| --- | --- | --- |
+| baseline at this target | 45.94 | |
+| second operand selected in the read stage | 53.19 | kept, +15.8% |
+| `abc9` technology mapping | 57.32 | kept, free |
+| debug read port removed | 60.09 | kept, +9.6% |
+| ALU result multiplexer in five classes | 54.82 | area only, no frequency |
+| base register forwarding removed | 53.17 | **rejected, 13% worse** |
+| a 25k part instead of a 45k | 57.64 | no effect |
+| ALU bypass forward removed entirely | 56.06 | not the constraint |
+
+Four of those are negative results and each killed a plausible theory:
+
+**Module boundaries do not exist.** The whole core elaborates to one flat
+Verilog module, so there is no synthesis boundary to lose optimisation across.
+
+**Logic depth is not the problem.** Collapsing a nineteen-case result
+multiplexer into five classes bought 0.1 per cent, and under `abc9` it was
+marginally worse, because `abc9` was already restructuring that tree better by
+hand than the hand did.
+
+**The part is not too big.** At 33 per cent utilisation on a 45k it looked like
+the placer had room to spread out. On a 25k at roughly sixty per cent it
+measured the same, so it was not spreading for want of density.
+
+**A narrower bypass network is worse, not better.** Removing base register
+forwarding halves the multiplexer inputs on every operand, and it measured 13
+per cent slower as well as costing cycles. The comparators it removes are not
+what the path is made of, and the interlock it adds in their place is. It stays
+a parameter, set the way the measurement says.
+
+The one that did work is the one that removed a whole extra copy of the
+register file: the debug read port, which nothing on a chip needs.
+
 ### The remaining path, and a parameter instead of an argument
 
 After step 4 the path is a block RAM read feeding the multiplier's partial

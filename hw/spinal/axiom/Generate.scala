@@ -38,6 +38,16 @@ object GenerateAxiomCoreLean extends App {
   println("Wrote generated/AxiomCoreLean.v")
 }
 
+/** No multiplier and no debug port, to see what the critical path is behind
+  * the DSP cascade.
+  */
+object GenerateAxiomCoreNoMul extends App {
+  AxiomSpinalConfig().generateVerilog(
+    new AxiomCore(withMultiplier = false, withDebugRegFilePort = false)
+      .setDefinitionName("AxiomCoreNoMul"))
+  println("Wrote generated/AxiomCoreNoMul.v")
+}
+
 /** The same, keeping base forwarding, to separate the two effects. */
 object GenerateAxiomCoreNoDebug extends App {
   AxiomSpinalConfig().generateVerilog(
