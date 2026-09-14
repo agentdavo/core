@@ -355,10 +355,96 @@ The first is a distinction in the pipeline API worth knowing: `isFiring` is
 has to happen when a transaction *leaves*, rather than when it succeeds, wants
 `isMoving`.
 
-**Still open:** a `CachePlugin` behind the same service. The contract is now the
-one a cache can meet, which was the point; the cache itself is M5b and belongs
-with the frequency work, since a cache is also the largest single block of
-memory the design would gain.
+## M5b First level caches — done
+
+A direct-mapped instruction cache and data cache behind the same
+`MemoryService` the core already asked for, in front of a memory slow enough to
+be worth caching. The core cannot tell: it asks for a port and gets one.
+
+Direct mapped rather than set associative, which is a decision about the part
+rather than about hit rates. A set associative cache needs a tag comparison per
+way, a multiplexer on the data path behind it and a replacement policy to keep;
+on a part where the core measures sixty per cent routing, all three land on the
+wrong side of the trade.
+
+Write-through with no allocation on a store miss: no dirty bits, no writeback
+machine, no eviction. Every store goes to the memory behind, so a store is as
+slow as that memory. A store buffer would hide that and is deliberately absent
+until the cost is measured rather than assumed.
+
+### What they are worth
+
+Against the same memory with the caches taken out, on a loop that fits in the
+instruction cache and rereads its data: **4.31 times**. A cache of zero bytes
+passes the port straight through, which is what makes that the same memory
+rather than a different one.
+
+### How big, measured rather than guessed
+
+Two workloads, one that fits in anything and one that does not, through a
+memory that takes eight cycles. Cycles, lower is better:
+
+| Geometry | Tight loop | Sweep |
+| --- | --- | --- |
+| no caches | 4,340 | 111,692 |
+| 512 B each | 837 | 75,502 |
+| 1 kB each | 837 | 75,502 |
+| 2 kB each | 837 | 75,502 |
+| 4 kB each | 837 | 21,038 |
+| 8 kB each | 837 | 21,038 |
+| tightly coupled memory | 724 | 18,556 |
+
+Two things fall out. A working set that fits needs almost nothing, and past the
+point where it fits, more is free but useless. And there is a knee: the sweep
+touches more than two kilobytes, so nothing below four helps it, and four gets
+within thirteen per cent of having no memory latency at all.
+
+**The two caches are not worth the same.** Splitting a budget:
+
+| Instruction | Data | Sweep |
+| --- | --- | --- |
+| 1 kB | 4 kB | 21,038 |
+| 4 kB | 4 kB | 21,038 |
+| 4 kB | 2 kB | 75,502 |
+| 8 kB | 2 kB | 75,502 |
+| 2 kB | 8 kB | 21,038 |
+
+A kilobyte of instruction cache and four of data is as good as four and four;
+eight and two is no better than four and two. The loops are small and the data
+is not, so the data cache is where the block RAM belongs. That is worth knowing
+before committing eight kilobytes evenly out of habit.
+
+### Line size, and a caveat about the model
+
+| Line | Tight loop | Sweep |
+| --- | --- | --- |
+| 16 B | 783 | 19,870 |
+| 32 B | 837 | 21,038 |
+| 64 B | 872 | 23,376 |
+| 128 B | 1,016 | 23,342 |
+
+Shorter is better here, and that result should not be believed outside this
+model. The memory behind charges its full latency for every doubleword and
+cannot burst, so a long line is simply more full-price accesses. Real memory
+amortises a burst across a line and the curve turns over the other way. The
+honest statement is that line size is the one parameter here whose measurement
+is an artefact of the memory model, and it should be re-measured against a
+bursting one before anybody picks a number from this table.
+
+### Three bugs, all needing a memory that answers late
+
+| Bug | Shape |
+| --- | --- |
+| A load's result was forwarded while the load still waited for memory | `availableAt` says which stage a value appears in; it cannot say whether it has appeared yet |
+| The machine reported itself halted with an older instruction still in flight | Stopping is meant to be precise, and between the trap latching and the drain it was not |
+| A redirect cancelling a transaction in decode before its instruction arrived hung the machine | The answer turned up with nobody to take it, the buffer filled, and fetch stopped asking |
+
+The first is the interesting one, because it looks like the availability rule
+from M5 and is not. That rule is about the pipeline and is fixed at
+elaboration; this is about the cycle. Backpressure does not cover it either: a
+stalled writeback still lets the read stage advance into an empty execute. A
+producer can now declare a readiness signal, and the interlock holds a consumer
+that would otherwise read a wire the memory has not driven yet.
 
 ## M6 Privilege and traps
 

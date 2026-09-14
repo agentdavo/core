@@ -56,6 +56,23 @@ object GenerateAxiomCoreNoDebug extends App {
   println("Wrote generated/AxiomCoreNoDebug.v")
 }
 
+/** The Base profile with caches, for measuring what they cost. */
+object GenerateAxiomCached extends App {
+  AxiomSpinalConfig().generateVerilog(
+    new AxiomSoc(memoryLatency = 8, withDebugRegFilePort = false,
+      plugins = AxiomProfile.cached).setDefinitionName("AxiomCached"))
+  println("Wrote generated/AxiomCached.v")
+}
+
+/** The same, with the caches removed, so the difference is the caches. */
+object GenerateAxiomUncached extends App {
+  AxiomSpinalConfig().generateVerilog(
+    new AxiomSoc(memoryLatency = 8, withDebugRegFilePort = false,
+      icacheBytes = 0, dcacheBytes = 0,
+      plugins = AxiomProfile.cached).setDefinitionName("AxiomUncached"))
+  println("Wrote generated/AxiomUncached.v")
+}
+
 object GenerateAxiomAll extends App {
   AxiomSpinalConfig().generateVerilog(new AxiomSoc())
   AxiomSpinalConfig().generateVerilog(new AxiomCore())
