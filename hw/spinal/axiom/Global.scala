@@ -1,0 +1,89 @@
+package axiom
+
+import spinal.core._
+import spinal.lib.misc.pipeline._
+
+/** Payload keys shared between plugins.
+  *
+  * A [[Payload]] is a typed key, not a signal. The hardware for it is created
+  * on the first node that asks for it, and the pipeline links propagate it
+  * between the nodes that use it, which means two plugins can agree on a value
+  * without either knowing the other exists and without the value being carried
+  * through stages that do not read it.
+  *
+  * Widths are read from [[AxiomParam]] lazily, because `Payload` takes its type
+  * by name. That is what lets this be an object rather than something that has
+  * to be constructed inside a database scope.
+  */
+object Global extends AreaObject {
+
+  /** Address of the instruction. */
+  val PC = Payload(UInt(AxiomParam.PC_WIDTH bits))
+
+  /** Fetch generation, bumped on every redirect.
+    *
+    * An instruction fetched under a stale generation is killed at decode. This
+    * is how the branch shadow is cleaned up without the branch having to know
+    * how many stages are in front of it.
+    */
+  val FETCH_GEN = Payload(UInt(2 bits))
+
+  val INSTRUCTION = Payload(Bits(Isa.INSTR_BITS bits))
+
+  // -- decoded register addresses ---------------------------------------
+  val RD_ADDR = Payload(UInt(AxiomParam.REG_ADDR_BITS bits))
+  val RN_ADDR = Payload(UInt(AxiomParam.REG_ADDR_BITS bits))
+  val RM_ADDR = Payload(UInt(AxiomParam.REG_ADDR_BITS bits))
+  val PD_ADDR = Payload(UInt(AxiomParam.PRED_ADDR_BITS bits))
+
+  // -- what the instruction touches, for hazard detection -----------------
+  val WRITES_RD = Payload(Bool())
+  val WRITES_PD = Payload(Bool())
+  val READS_RN  = Payload(Bool())
+  val READS_RM  = Payload(Bool())
+
+  /** Reads the register named by the `rd` field. Stores, MOVK, CAS and the
+    * second half of a pair all do this, which is why `rd` needs a read port.
+    */
+  val READS_RD = Payload(Bool())
+
+  // -- register file read data -------------------------------------------
+  val RS_N = Payload(Bits(AxiomParam.XLEN bits))
+  val RS_M = Payload(Bits(AxiomParam.XLEN bits))
+  val RS_D = Payload(Bits(AxiomParam.XLEN bits))
+
+  /** The instruction's constant, already sign extended and, for memory
+    * accesses, already scaled by the access size.
+    */
+  val IMM = Payload(Bits(AxiomParam.XLEN bits))
+
+  /** The instruction updates its base register as well as its destination.
+    *
+    * This is what pre-index, post-index and the pair forms cost: a second
+    * architectural write, which needs a second write port and a second
+    * forwarding comparator on every operand.
+    */
+  val WRITES_BASE = Payload(Bool())
+  val BASE_VALUE  = Payload(Bits(AxiomParam.XLEN bits))
+
+  /** The final transaction of an instruction.
+    *
+    * A pair goes through the memory stage twice and so puts two transactions
+    * down the pipeline, one per register it writes. Both must commit, but the
+    * instruction has only retired once, so the counter and the retire trace
+    * look at this.
+    */
+  val LAST_BEAT = Payload(Bool())
+
+  /** Sign extended, word scaled program counter relative displacement. */
+  val BRANCH_OFF = Payload(UInt(AxiomParam.PC_WIDTH bits))
+
+  /** No execution unit claimed this instruction.
+    *
+    * That covers an undefined primary opcode, an undefined sub-function inside
+    * a defined one, and an instruction whose unit was configured out of this
+    * build. All three are the same thing architecturally: an illegal
+    * instruction trap.
+    */
+  val ILLEGAL = Payload(Bool())
+}
