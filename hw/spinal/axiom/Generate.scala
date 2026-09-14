@@ -64,6 +64,17 @@ object GenerateAxiomCached extends App {
   println("Wrote generated/AxiomCached.v")
 }
 
+/** The geometry the sizing measurements actually recommend: a small
+  * instruction cache and a data cache four times its size.
+  */
+object GenerateAxiomCachedLean extends App {
+  AxiomSpinalConfig().generateVerilog(
+    new AxiomSoc(memoryLatency = 8, withDebugRegFilePort = false,
+      icacheBytes = 1024, dcacheBytes = 4096,
+      plugins = AxiomProfile.cached).setDefinitionName("AxiomCachedLean"))
+  println("Wrote generated/AxiomCachedLean.v")
+}
+
 /** The same, with the caches removed, so the difference is the caches. */
 object GenerateAxiomUncached extends App {
   AxiomSpinalConfig().generateVerilog(
