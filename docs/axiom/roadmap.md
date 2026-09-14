@@ -96,6 +96,53 @@ rather than decode, removed the whole class rather than the instance.
 
 ---
 
+## Measured on an ECP5
+
+`synth/` runs yosys and nextpnr out of context and attributes every primitive
+and every critical path segment back to the plugin that created it. The first
+pass said this, on an LFE5U-45F at a 100 MHz target:
+
+| | Before | After the register file change |
+| --- | --- | --- |
+| LUT4 | 34,129 | 13,375 |
+| Flip-flops | 3,638 | 1,637 |
+| Distributed RAM | 0 | 256 |
+| Routed fmax | not reached | 21.98 MHz |
+
+Forty per cent of the original core was one register file read path: thirty-two
+64-bit registers in flip-flops with three asynchronous read ports become three
+32-to-1 multiplexers 64 bits wide. Rebuilding it as two distributed RAM banks
+with a live value table, which is how you get two write ports out of
+single-write arrays, removed 61 per cent of the logic on its own.
+
+The critical path is now 45.5 ns, of which 19.8 is logic and 25.7 is routing,
+and it runs from a block RAM output through the writeback result mux, forward
+into execute, through the multiplier and back to the register file. The time
+divides as:
+
+| Plugin | ns | Share |
+| --- | --- | --- |
+| ALU, almost all of it the 64 by 64 multiplier | 23.8 | 52% |
+| Tightly coupled memory read | 11.5 | 25% |
+| Register file writeback mux | 5.3 | 12% |
+| Everything else | 4.9 | 11% |
+
+That gives a concrete order of work, which is the point of building the flow
+before guessing at cache sizes:
+
+1. **Pipeline the multiplier.** Sixteen DSP blocks and a four-level adder tree
+   in one cycle is most of the path. The DSP has input and output registers;
+   using them makes multiply a three-cycle operation, which the control links
+   already support through `haltWhen`. Worth roughly 20 ns.
+2. **Register the memory output, or shorten the writeback to execute forward.**
+   Forwarding from writeback into execute chains the block RAM read delay onto
+   the front of the ALU. Worth roughly 10 ns.
+3. **Share one funnel shifter.** The ALU currently builds eight separate
+   shifters for the four shift and rotate forms and their four 32-bit
+   variants. One 128 to 64 funnel shifter does all of them.
+
+Only after that does the pipeline need restructuring rather than tidying.
+
 ## M5 Stallable memory — next
 
 Today both memory ports have a fixed one-cycle latency and no backpressure.

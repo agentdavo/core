@@ -43,7 +43,47 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
 
   val logic = during build new Area {
     val xlen = AxiomParam.XLEN.get
-    val regs = Vec.fill(AxiomParam.REG_COUNT.get)(Reg(Bits(xlen bits)) init 0)
+    val count = AxiomParam.REG_COUNT.get
+
+    /** The register file storage.
+      *
+      * Not a vector of flip-flops. Thirty-two 64-bit registers with three
+      * asynchronous read ports built from flip-flops become three 32-to-1
+      * multiplexers 64 bits wide, and on an ECP5 that measured at roughly
+      * forty per cent of the whole core and a critical path that held the
+      * design to 13 MHz. Distributed RAM does the same job in about a
+      * fifteenth of the area and a fraction of the delay.
+      *
+      * Distributed RAM has one write port, and this file needs two, because an
+      * indexed access writes its base register as well as its destination. The
+      * standard answer is a live value table: one bank per write port, each
+      * replicated per read port, plus one bit per register saying which bank
+      * last wrote it. Every array stays single-write, so every array maps to
+      * distributed RAM, and the live value table is one bit wide and therefore
+      * cheap to keep in flip-flops.
+      */
+    val storage = new Area {
+      val PortRn = 0; val PortRm = 1; val PortRd = 2; val PortDebug = 3
+      val readPorts = 4
+
+      val banks = Array.tabulate(2, readPorts) { (write, read) =>
+        val bank = Mem(Bits(xlen bits), count)
+        bank.init(Seq.fill(count)(B(0, xlen bits)))
+        bank.setName(s"bank_${write}_$read")
+        bank
+      }
+
+      /** Which bank holds the current value of each register. */
+      val live = Vec.fill(count)(Reg(Bool()) init False)
+
+      def write(port: Int, enable: Bool, address: UInt, data: Bits): Unit = {
+        for (read <- 0 until readPorts) banks(port)(read).write(address, data, enable)
+        when(enable) { live(address) := Bool(port == 1) }
+      }
+
+      def read(port: Int, address: UInt): Bits =
+        Mux(live(address), banks(1)(port).readAsync(address), banks(0)(port).readAsync(address))
+    }
 
     val ex = ctrl(Stages.EXECUTE)
     val me = ctrl(Stages.MEMORY)
@@ -68,8 +108,8 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     val wbWritesRd = wb.down.isFiring && wb.down(Global.WRITES_RD) && wb.down(Global.RD_ADDR) =/= 0
     val wbWritesBase = wb.down.isFiring && wb.down(Global.WRITES_BASE) && wb.down(Global.RN_ADDR) =/= 0
 
-    when(wbWritesBase) { regs(wb.down(Global.RN_ADDR)) := wb.down(Global.BASE_VALUE) }
-    when(wbWritesRd) { regs(wb.down(Global.RD_ADDR)) := wbResult }
+    storage.write(0, wbWritesRd, wb.down(Global.RD_ADDR), wbResult)
+    storage.write(1, wbWritesBase, wb.down(Global.RN_ADDR), wb.down(Global.BASE_VALUE))
 
     // ---- read and forward, both in execute --------------------------------
     val memWritesRd = me.isValid && me.down(Global.WRITES_RD) && me.down(Global.RD_ADDR) =/= 0
@@ -80,9 +120,9 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     /** Assignments run oldest first so the newest producer wins: the memory
       * stage holds a younger instruction than the writeback stage does.
       */
-    def readForwarded(address: UInt): Bits = {
+    def readForwarded(port: Int, address: UInt): Bits = {
       val value = Bits(xlen bits)
-      value := regs(address)
+      value := storage.read(port, address)
       when(wbHasBase && wb.down(Global.RN_ADDR) === address) { value := wb.down(Global.BASE_VALUE) }
       when(wbHasRd && wb.down(Global.RD_ADDR) === address) { value := wbResult }
       when(memWritesBase && me.down(Global.RN_ADDR) === address) { value := me.down(Global.BASE_VALUE) }
@@ -91,9 +131,9 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       value
     }
 
-    ex.down(Global.RS_N) := readForwarded(ex.down(Global.RN_ADDR))
-    ex.down(Global.RS_M) := readForwarded(ex.down(Global.RM_ADDR))
-    ex.down(Global.RS_D) := readForwarded(ex.down(Global.RD_ADDR))
+    ex.down(Global.RS_N) := readForwarded(storage.PortRn, ex.down(Global.RN_ADDR))
+    ex.down(Global.RS_M) := readForwarded(storage.PortRm, ex.down(Global.RM_ADDR))
+    ex.down(Global.RS_D) := readForwarded(storage.PortRd, ex.down(Global.RD_ADDR))
 
     // ---- the load-use interlock -------------------------------------------
     val lateAtMemory = sources.filter(_.late)
@@ -115,6 +155,6 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     // ---- debug -------------------------------------------------------------
     // A combinational peek at the committed file, for simulation and bring-up.
     val io = host[InterfaceService].io
-    io.dbgRegData := regs(io.dbgRegAddr)
+    io.dbgRegData := storage.read(storage.PortDebug, io.dbgRegAddr)
   }
 }
