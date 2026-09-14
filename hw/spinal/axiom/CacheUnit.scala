@@ -139,10 +139,8 @@ case class CacheUnit(
     val enable = False
     val address = UInt(indexBits + wordBits bits)
     val value = Bits(dataWidth bits)
-    val mask = Bits(dataWidth / 8 bits)
     address := 0
     value := 0
-    mask := B(dataWidth / 8 bits, default -> True)
   }
 
   // ---- the miss -----------------------------------------------------------
@@ -172,23 +170,40 @@ case class CacheUnit(
   // whole and the word that was asked for can be handed back.
   refill.done := refill.active && io.memory.rvalid && refill.last
 
-  // A store that finds its line present updates it, so the next load of that
-  // address does not go back to memory for something just written. A store
-  // that misses does not allocate.
+  /** A store that finds its line present updates it, so the next load of that
+    * address does not go back to memory for something just written. A store
+    * that misses does not allocate.
+    *
+    * A store of fewer than eight bytes is merged here rather than written
+    * through byte enables, and that is an area decision rather than a
+    * stylistic one. A sixty-four bit array with byte enables maps as eight
+    * nine-bit block RAM slices instead of packing densely, which costs four
+    * times the memory the data needs. The old word is already on hand: every
+    * command reads the array on the cycle it is accepted, including a store,
+    * and the lookup cycle is one later. Nothing else can have touched it in
+    * between, because a store refuses the next command for exactly that cycle.
+    */
   if (writes) {
+    val merged = new Area {
+      val keep = Bits(dataWidth bits)
+      for (byte <- 0 until dataWidth / 8) {
+        keep(byte * 8 + 7 downto byte * 8) := B(8 bits, default -> !lookup.mask(byte))
+      }
+      val value = (readData & keep) | (lookup.wdata & ~keep)
+    }
+
     when(lookup.valid && lookup.write && lookup.hit) {
       arrayWrite.enable := True
       arrayWrite.address := lookup.index @@ wordOf(lookup.address)
-      arrayWrite.value := lookup.wdata
-      arrayWrite.mask := lookup.mask
+      arrayWrite.value := merged.value
     }
   }
 
+  // Whole words only, on both sides. Nothing here writes part of one.
   array.write(
     address = arrayWrite.address,
     data = arrayWrite.value,
-    enable = arrayWrite.enable,
-    mask = arrayWrite.mask
+    enable = arrayWrite.enable
   )
 
   // ---- the port on the memory behind --------------------------------------

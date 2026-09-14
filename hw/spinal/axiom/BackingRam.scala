@@ -79,8 +79,15 @@ case class BackingRam(
     val reads = accepted && !bus.write
     val index_ = wordIndex(bus.address)
 
-    val readData = ram.readSync(address = index_, enable = reads)
+    // Channel zero's address and read enable are shared with the debug access,
+    // which takes the array over while it is enabled.
+    val borrowed = withDebug && index == 0
+    val readAddress = if (borrowed) Mux(debugActive, io.debug.address, index_) else index_
+    val readEnable = if (borrowed) debugActive || reads else reads
+
+    val readData = ram.readSync(address = readAddress, enable = readEnable)
     bus.rdata := readData
+    if (borrowed) io.debug.rdata := readData
   }
 
   /** The single write port, driven by whichever channel is writing, or by the
@@ -118,11 +125,14 @@ case class BackingRam(
     ram.write(address = address, data = value, enable = enable, mask = mask)
   }
 
-  /** The debug read has its own port on the array rather than borrowing a
-    * channel's, so that loading a program cannot disturb a channel's held
-    * answer. It costs a read port and is only present when asked for.
+  /** The debug read borrows channel zero's port rather than having one of its
+    * own.
+    *
+    * Its own port reads better and costs three times the memory. An ECP5 block
+    * RAM has two ports; a third read makes yosys replicate the whole array, so
+    * a thirty-two kilobyte memory with two channels and a debug read was
+    * forty-eight block RAMs where the arithmetic says sixteen. The debug
+    * access only happens with the core in reset or halted, which is exactly
+    * when channel zero is idle, so there is nothing to disturb.
     */
-  val debugRead = withDebug generate new Area {
-    io.debug.rdata := ram.readSync(address = io.debug.address, enable = debugActive)
-  }
 }
