@@ -205,6 +205,10 @@ them by swapping operands.
 point: the dependency on the old value is visible in the encoding instead of
 being hidden in the rename logic.
 
+The sense bit `inv` means the same thing in both `SEL` and `BP`: the
+instruction acts on `p ^ inv`, so setting it inverts the predicate rather than
+inverting the operation. There is one polarity convention, not two.
+
 `BP` branches on a predicate and has 22 bits of displacement, reaching 8 MiB.
 `B` and `BL` are unconditional with 26 bits, reaching 128 MiB. `JALR` computes
 its target from a register and clears the low two bits rather than trapping, so
@@ -252,6 +256,13 @@ pointer anyway.
 | `LDx.SEQ` | sequentially consistent |
 | `STx.RL` | release, RCpc |
 | `STx.SEQ` | sequentially consistent |
+
+Only two of the four ordering annotations are defined on `LD_ORD` and
+`ST_ORD`: acquire/release and sequentially consistent. The plain and
+acquire-and-release encodings are reserved there and trap, because a plain
+ordered access is just an ordinary load or store and should use the encoding
+with a displacement. All four are defined on the atomics, where an operation
+that both acquires and releases is exactly what a lock release needs.
 
 Ordered loads narrower than a doubleword **zero** extend. There is no signed
 form, because these address a lock, a flag or a reference count, where the
@@ -330,6 +341,14 @@ the following, stops, and reports the cause and the offending program counter.
 | `MISALIGNED_FETCH` | Reserved; `JALR` masks its target so this cannot occur yet |
 | `MISALIGNED_LOAD` | Load address not naturally aligned |
 | `MISALIGNED_STORE` | Store address not naturally aligned |
+
+Alignment is required of every form that carries a size, including the ordered
+accesses and the pairs, and the cause follows the direction of the access: a
+misaligned `LDP` or ordered load reports `MISALIGNED_LOAD`, a misaligned `STP`
+or ordered store reports `MISALIGNED_STORE`. A pair needs doubleword alignment
+whatever it moves, since it touches `address` and `address + 8`.
+
+An atomic reports `MISALIGNED_LOAD`, because a read-modify-write reads first.
 
 A trapping or halting instruction does not commit. Instructions ahead of it in
 the pipeline do.

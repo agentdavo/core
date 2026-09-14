@@ -1029,6 +1029,50 @@ class AxiomIsaSpec extends AxiomSpec {
     }
   }
 
+  test("every atomic function on a word leaves the high word alone") {
+    // The same ten functions again at word size. The high half of every
+    // doubleword is a marker that no word atomic may disturb, and the old
+    // value each one returns is 0xf0, which is positive and so looks the same
+    // whether or not the sign extension is working; that case is checked on
+    // its own above with a negative word.
+    val start = 0xaaaaaaaa000000f0L
+    val operand = 0x0fL
+    val ops: Seq[(String, (Assembler, Int, Int, Int) => Unit, Long)] = Seq(
+      ("swp", (a, d, n, s) => a.swp(d, n, s, Isa.SIZE_W), 0x0fL),
+      ("ldadd", (a, d, n, s) => a.ldadd(d, n, s, Isa.SIZE_W), 0xffL),
+      ("ldand", (a, d, n, s) => a.ldand(d, n, s, Isa.SIZE_W), 0x00L),
+      ("ldor", (a, d, n, s) => a.ldor(d, n, s, Isa.SIZE_W), 0xffL),
+      ("ldxor", (a, d, n, s) => a.ldxor(d, n, s, Isa.SIZE_W), 0xffL),
+      // rd is preloaded with 0xf0 below, which is what memory holds, so this
+      // compare and swap succeeds.
+      ("cas", (a, d, n, s) => a.cas(d, n, s, Isa.SIZE_W), 0x0fL),
+      ("ldmin", (a, d, n, s) => a.ldmin(d, n, s, Isa.SIZE_W), 0x0fL),
+      ("ldmax", (a, d, n, s) => a.ldmax(d, n, s, Isa.SIZE_W), 0xf0L),
+      ("ldminu", (a, d, n, s) => a.ldminu(d, n, s, Isa.SIZE_W), 0x0fL),
+      ("ldmaxu", (a, d, n, s) => a.ldmaxu(d, n, s, Isa.SIZE_W), 0xf0L)
+    )
+    val data = ops.indices.map(i => (DataWord + i) -> start).toMap
+    val program = Assembler() { asm =>
+      import asm._
+      li(s1, operand)
+      for (((_, emit, _), i) <- ops.zipWithIndex) {
+        li(s0, DataByte + i * 8)
+        li(t0, 0xf0)
+        emit(asm, t0, s0, s1)
+        std(t0, s0, 128) // park the old value sixteen doublewords further on
+      }
+      halt()
+    }
+    val r = cosimProgram(program, data = data, readRange = DataWord until (DataWord + 32))
+    for (((name, _, lowWord), i) <- ops.zipWithIndex) {
+      val after = 0xaaaaaaaa00000000L | lowWord
+      assert(r.word(DataWord + i) == after,
+        f"$name%s left 0x${r.word(DataWord + i)}%016x in memory, expected 0x$after%016x")
+      assert(r.word(DataWord + i + 16) == 0xf0L,
+        f"$name%s returned 0x${r.word(DataWord + i + 16)}%016x, expected the old word 0xf0")
+    }
+  }
+
   test("signed and unsigned atomic min and max disagree on a negative") {
     val r = cosim(
       data = Map(DataWord -> -1L, (DataWord + 1) -> -1L, (DataWord + 2) -> -1L, (DataWord + 3) -> -1L),
