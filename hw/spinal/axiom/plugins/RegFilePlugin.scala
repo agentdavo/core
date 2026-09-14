@@ -165,9 +165,15 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     val exWritesRd = ex.isValid && ex.down(Global.WRITES_RD) && ex.down(Global.RD_ADDR) =/= 0
     val exWritesBase = ex.isValid && ex.down(Global.WRITES_BASE) && ex.down(Global.RN_ADDR) =/= 0
     val memWritesRd = me.isValid && me.down(Global.WRITES_RD) && me.down(Global.RD_ADDR) =/= 0
-    val memWritesBase = me.isValid && me.down(Global.WRITES_BASE) && me.down(Global.RN_ADDR) =/= 0
+    // The upstream side for the base, as the interlock uses. A pair clears the
+    // downstream flag on its first pass so the update is not performed twice,
+    // and a consumer sampling during that pass would see no base write and
+    // read the register file instead, which does not have it yet. The value
+    // is the same on both passes, so offering it on both is the correct
+    // answer as well as the simpler one.
+    val memWritesBase = me.isValid && me.up(Global.WRITES_BASE) && me.down(Global.RN_ADDR) =/= 0
     val wbHasRd = wb.isValid && wb.down(Global.WRITES_RD) && wb.down(Global.RD_ADDR) =/= 0
-    val wbHasBase = wb.isValid && wb.down(Global.WRITES_BASE) && wb.down(Global.RN_ADDR) =/= 0
+    val wbHasBase = wb.isValid && wb.up(Global.WRITES_BASE) && wb.down(Global.RN_ADDR) =/= 0
 
     /** Assignments run oldest first so the newest producer wins: the memory
       * stage holds a younger instruction than the writeback stage does.

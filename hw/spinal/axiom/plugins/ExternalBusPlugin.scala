@@ -32,6 +32,8 @@ class ExternalBusPlugin extends AxiomPlugin with MemoryService {
     val io = host[BusInterfaceService]
     io.ibus.enable := instructionPort.enable
     io.ibus.address := instructionPort.address
+    instructionPort.ready := io.ibus.ready
+    instructionPort.rvalid := io.ibus.rvalid
     instructionPort.data := io.ibus.data
 
     io.dbus.enable := dataPort.enable
@@ -39,6 +41,8 @@ class ExternalBusPlugin extends AxiomPlugin with MemoryService {
     io.dbus.address := dataPort.address
     io.dbus.mask := dataPort.mask
     io.dbus.wdata := dataPort.wdata
+    dataPort.ready := io.dbus.ready
+    dataPort.rvalid := io.dbus.rvalid
     dataPort.rdata := io.dbus.rdata
   }
 }

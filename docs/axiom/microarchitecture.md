@@ -224,6 +224,29 @@ from a deeper stage wins over one from a shallower stage in the same cycle,
 because the deeper instruction is the older one. Adding a stage costs nothing
 anywhere else, which is exactly what adding the read stage demonstrated.
 
+## 6b. Memory
+
+Both ports use a ready/valid contract with no promised latency and no hold. A
+command is accepted when `enable` and `ready` meet; an accepted read answers
+later with `rvalid`, in order; a write needs acceptance and nothing more, which
+is what keeps a store to a tightly coupled memory at one cycle.
+
+At most one command per port is outstanding, which is what lets each port's
+response buffer be one entry deep. That is arranged by construction rather than
+by counting: a stage offers its command only on a cycle where the transaction
+holding it can move on. In fetch that is a correctness requirement rather than
+a simplification. A transaction left sitting in fetch with an accepted command
+would have its program counter changed under it by a redirect, and would reach
+decode carrying the new counter, the new generation, and the instruction from
+the old address, passing every check on the way.
+
+Buffering is what the contract costs. `rvalid` is a pulse, and the stage that
+wants it may be held for an unrelated reason on the cycle it arrives, so fetch
+buffers into decode and the load/store unit buffers into writeback. The
+load/store unit's buffer has a second reader: an atomic takes its response in
+the memory stage, because its second pass computes what it writes from what the
+first pass read.
+
 ## 7. Stopping
 
 There is no trap handler yet, so stopping means stopping. What matters is that

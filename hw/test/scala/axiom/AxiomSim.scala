@@ -72,6 +72,17 @@ object AxiomSim {
     config.workspaceName("AxiomSocNoBaseFwd")
       .compile(new AxiomSoc(memWords = MemWords, forwardBase = false))
 
+  /** A memory that refuses commands about a third of the time.
+    *
+    * The whole point of the stallable protocol is that the core waits on a
+    * signal rather than on a count, and the only way to know it does is to run
+    * the same programs through a memory that makes it wait. Answers must be
+    * identical; only the cycle count may differ.
+    */
+  lazy val socStalling: SimCompiled[AxiomSoc] =
+    config.workspaceName("AxiomSocStalling")
+      .compile(new AxiomSoc(memWords = MemWords, memoryStall = 5))
+
   /** Reset vector at 0x400 rather than 0. */
   val AltResetVector: Int = 0x400
   lazy val socAltReset: SimCompiled[AxiomSoc] =

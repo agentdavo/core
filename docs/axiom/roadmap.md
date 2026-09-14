@@ -318,27 +318,47 @@ rather than an optimisation, and that step is described above. It should wait
 anyway: a deeper pipeline changes what the memory protocol has to tolerate, so
 the protocol comes first.
 
-## M5 Stallable memory — next
+## M5 Stallable memory — done
 
-Today both memory ports have a fixed one-cycle latency and no backpressure.
-That is the largest simplification in A1 and the first thing that should
-change, because everything after it depends on being able to wait.
+Both memory ports used to promise the word one cycle later and to hold it until
+somebody read it. A tightly coupled memory can do both; a cache can do neither,
+so everything after this milestone was waiting on it.
 
-**Work:**
-- give `MemoryService` a ready signal and a response valid
-- fetch: hold the program counter and tolerate a late instruction
-- load/store: `haltWhen` on an outstanding response rather than assuming one
-  cycle
-- a `CachePlugin` behind the same service, so the tightly coupled memory and
-  the cache are interchangeable
+**The contract now.** A command is offered while `enable` is high and accepted
+on a cycle where `enable` and `ready` are both high. An accepted read produces
+exactly one response, later, marked by `rvalid`, and responses come back in
+order. A write needs acceptance and nothing else, which keeps a store to a
+tightly coupled memory at one cycle. Nothing is held: the core buffers each
+response itself, one deep, because at most one command per port is outstanding.
 
-**Why first:** the control links already carry backpressure, so the pipeline
-does not change. What changes is that the two plugins that touch memory stop
-assuming. Divide, caches and any real interconnect all wait on this.
+That last part is by construction rather than by counting. A stage offers its
+command only when the transaction holding it can move on, so a stalled pipeline
+cannot run ahead of its own responses. In fetch that is also a correctness
+requirement, not just a simplification: a transaction that sat in fetch holding
+an accepted command would have its program counter moved under it by a
+redirect, and would arrive at decode carrying the new counter, the new
+generation, and the instruction from the old address.
 
-**Exit:** the random co-simulation passes unchanged with a memory plugin that
-inserts random stalls. That is the test that matters, and it is cheap because
-the harness already exists.
+**It costs nothing when the memory does not stall.** The demo program is 235
+cycles either way.
+
+**Three real bugs, all found by the stalling memory and all latent before it:**
+
+| Bug | Shape |
+| --- | --- |
+| A branch executed the instruction it jumped over | A cancelled transaction does not fire, so it left its response in the buffer for the next one |
+| A pair touched one address twice | Its second pass started when the pair arrived rather than when the first access left |
+| A pair's base update went missing | Forwarding read a flag the pair clears on its first pass, so a consumer sampling then saw no base write |
+
+The first is a distinction in the pipeline API worth knowing: `isFiring` is
+`isReady && !isRemoved`, so a thrown transaction does not fire. Anything that
+has to happen when a transaction *leaves*, rather than when it succeeds, wants
+`isMoving`.
+
+**Still open:** a `CachePlugin` behind the same service. The contract is now the
+one a cache can meet, which was the point; the cache itself is M5b and belongs
+with the frequency work, since a cache is also the largest single block of
+memory the design would gain.
 
 ## M6 Privilege and traps
 

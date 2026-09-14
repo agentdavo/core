@@ -9,7 +9,7 @@ against reference models with Verilator as the backend.
 | Width | 32-bit | 64-bit |
 | Registers | 16 general | 32 general, 8 predicate |
 | Implementation | `C1`, fixed five stage | `A1`, six stage, fully plugin-composed |
-| Memory | Fixed latency, no backpressure | Fixed latency, backpressure-ready pipeline |
+| Memory | Fixed latency, no backpressure | Ready/valid, variable latency, no hold |
 | Structure | One component per block | Every part is a plugin |
 | Spec | [docs/isa.md](docs/isa.md) | [docs/axiom/isa.md](docs/axiom/isa.md) |
 | Microarchitecture | [docs/microarchitecture.md](docs/microarchitecture.md) | [docs/axiom/microarchitecture.md](docs/axiom/microarchitecture.md) |
@@ -178,5 +178,6 @@ CORE-32 is finished. Axiom-64 implements the whole Base profile: arithmetic
 including the 32-bit forms, constant formation, compares and select, branches,
 every memory form including pairs, the three addressing modes, ordered accesses,
 far-atomics, fences and traps. There is no privileged mode, no divide, no tile
-unit, and both memory ports are still fixed latency. See
+unit, and no cache, though both memory ports now speak a ready/valid protocol
+that one could sit behind. See
 [docs/axiom/roadmap.md](docs/axiom/roadmap.md).

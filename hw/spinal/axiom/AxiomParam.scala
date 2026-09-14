@@ -70,6 +70,19 @@ object AxiomParam {
     */
   val FORWARD_BASE = Database.blocking[Boolean]()
 
+  /** How often the tightly coupled memory refuses a command, out of sixteen.
+    *
+    * Zero is a memory that always accepts and answers the next cycle, which is
+    * what a tightly coupled memory does and what the core is built for. Any
+    * other value makes it stall pseudo-randomly, which is how the stallable
+    * protocol gets tested: the same programs must produce the same answers
+    * through a memory that says no, only taking more cycles.
+    *
+    * It is in the design rather than the test bench because the test bench
+    * drives the core through its ports and cannot reach inside the memory.
+    */
+  val MEMORY_STALL = Database.blocking[Int]()
+
   /** A combinational read port on the register file for the test bench.
     *
     * It is a whole extra copy of every RAM bank and nothing on a real chip
@@ -86,7 +99,8 @@ object AxiomParam {
       withAtomics: Boolean = true,
       forwardLateFromWriteback: Boolean = true,
       forwardBase: Boolean = true,
-      withDebugRegFilePort: Boolean = true
+      withDebugRegFilePort: Boolean = true,
+      memoryStall: Int = 0
   ): Unit = {
     XLEN.set(Isa.XLEN)
     PC_WIDTH.set(Isa.XLEN)
@@ -101,6 +115,7 @@ object AxiomParam {
     FORWARD_LATE_FROM_WRITEBACK.set(forwardLateFromWriteback)
     FORWARD_BASE.set(forwardBase)
     WITH_DEBUG_REGFILE_PORT.set(withDebugRegFilePort)
+    MEMORY_STALL.set(memoryStall)
   }
 }
 

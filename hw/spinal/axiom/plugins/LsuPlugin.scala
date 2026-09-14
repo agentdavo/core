@@ -150,6 +150,33 @@ class LsuPlugin extends AxiomPlugin {
   val logic = during build new Area {
     val xlen = AxiomParam.XLEN.get
 
+    /** The one-deep response buffer, and the two places a response is taken.
+      *
+      * A load's data is taken in writeback, where the lane is picked and
+      * extended. An atomic's is taken in memory, because its second pass needs
+      * the old value to compute the new one. Those are the only two readers,
+      * and at most one command is outstanding, so one entry is enough.
+      *
+      * Buffering at all is what the contract change costs: `rvalid` is a pulse
+      * and the stage that wants it may be held for some other reason on the
+      * cycle it arrives.
+      */
+    val response = new Area {
+      val data = Reg(Bits(xlen bits)) init 0
+      val full = Reg(Bool()) init False
+      val takenByMemory = Bool()
+      val takenByWriteback = Bool()
+      val taken = takenByMemory || takenByWriteback
+
+      when(bus.rvalid) { data := bus.rdata }
+      full := (full || bus.rvalid) && !taken
+
+      // Arriving counts as present, so a memory that answers the next cycle
+      // never costs a cycle in the buffer.
+      val present = full || bus.rvalid
+      val word = Mux(full, data, bus.rdata)
+    }
+
     // =================================================================
     // Decode: split the claim into the two result paths, early enough for
     // the interlock to see it
@@ -207,8 +234,13 @@ class LsuPlugin extends AxiomPlugin {
       node.duplicateWhen(active && kind.isPair && !beat)
       node.haltWhen(active && kind.isAtomic && !beat)
 
-      when(active && (kind.isPair || kind.isAtomic) && !beat) { beat := True }
-      when(node.down.isFiring && beat) { beat := False }
+      // A pair's second pass starts when the first one actually leaves, not
+      // merely when the pair arrives. Those were the same cycle while the
+      // memory always accepted, and are not once it can refuse: the beat would
+      // advance past an access that had not been issued, and the pair would
+      // touch one address twice.
+      when(active && kind.isPair && !beat && node.down.isMoving) { beat := True }
+      when(node.down.isMoving && beat) { beat := False }
       when(!node.isValid) { beat := False }
 
       // The second half of a pair targets the rm field and must not repeat the
@@ -234,10 +266,40 @@ class LsuPlugin extends AxiomPlugin {
       val address = node(ADDRESS) + Mux(kind.isPair && beat, U(8), U(0)).resized
       val addressLow = node(ADDR_LOW)
 
+      /** The bus handshake for this beat.
+        *
+        * A beat offers its command until the memory takes it, and the stage
+        * holds until then. `issued` is what stops the same access being asked
+        * for twice while the stage waits for some later reason.
+        *
+        * Never two commands in flight: the next beat waits for the answer to
+        * the last one, and for the buffer to be emptied by whoever wanted it.
+        * That is what keeps the response buffer one deep.
+        */
+      val issued = Reg(Bool()) init False
+      val outstanding = Reg(Bool()) init False
+      val stillOwed = outstanding && !bus.rvalid
+      val bufferBusy = response.full && !response.taken
+
+      /** The atomic's read, taken here rather than in writeback, because the
+        * second pass computes what it writes from what the first pass read.
+        */
+      val atomicRead = new Area {
+        val arrived = active && kind.isAtomic && !beat && issued && response.present
+        val value = Reg(Bits(xlen bits)) init 0
+        // Clearing `issued` is what lets the second pass ask for the bus. The
+        // two passes of an atomic do not leave the stage between them, so the
+        // usual clear on the way out never happens, and without this the write
+        // would simply never be offered. Never both in one cycle: arriving
+        // needs a command already accepted, offering needs none.
+        when(arrived) { value := response.word; beat := True; issued := False }
+      }
+      response.takenByMemory := atomicRead.arrived
+
       // ---- atomic read-modify-write -----------------------------------
       val atomic = new Area {
         val fn = instr(10 downto 7).asUInt
-        val raw = (bus.rdata >> (addressLow @@ U"000")).resize(xlen)
+        val raw = (atomicRead.value >> (addressLow @@ U"000")).resize(xlen)
 
         def extend(value: Bits, signed: Boolean): Bits = {
           val out = Bits(xlen bits)
@@ -289,11 +351,25 @@ class LsuPlugin extends AxiomPlugin {
         default        { laneMask := 0xff }
       }
 
-      bus.enable := active
-      bus.write := active && (kind.isStore || (kind.isAtomic && beat && atomic.commits))
+      // A compare-and-swap that finds the wrong value wants no command at all
+      // on its second pass. Under a fixed-latency bus that was a read nobody
+      // looked at; here it would be a response nobody takes, and the buffer
+      // would still be holding it when the next load wanted the buffer.
+      val compareFailed = kind.isAtomic && beat && !atomic.commits
+      val wantsCommand = active && !compareFailed
+
+      bus.enable := wantsCommand && !issued && !stillOwed && !bufferBusy
+      bus.write := kind.isStore || (kind.isAtomic && beat && atomic.commits)
       bus.address := address.resized
       bus.wdata := (storeData.asUInt << bitShift).resize(xlen).asBits
       bus.mask := (laneMask << addressLow).resize(8).asBits
+
+      val accepted = bus.enable && bus.ready
+      outstanding := (outstanding || (accepted && !bus.write)) && !bus.rvalid
+      when(accepted) { issued := True }
+      when(node.down.isMoving) { issued := False }
+
+      node.haltWhen(wantsCommand && !issued && !accepted)
     }
 
     // =================================================================
@@ -304,7 +380,16 @@ class LsuPlugin extends AxiomPlugin {
       val instr = node(Global.INSTRUCTION)
       val kind = new Kind(instr)
 
-      val shifted = (bus.rdata >> (node(ADDR_LOW) @@ U"000")).resize(xlen)
+      // A load is the only thing here that is owed an answer. Everything else
+      // passes straight through, so a store never waits for memory twice.
+      val expectsData = node.isValid && node(SEL) && kind.isLoad
+      node.haltWhen(expectsData && !response.present)
+      // isMoving for the same reason it is used in the fetch buffer: a
+      // cancelled transaction issued its command all the same, and the answer
+      // it is owed has to be taken out of the way.
+      response.takenByWriteback := expectsData && node.up.isMoving
+
+      val shifted = (response.word >> (node(ADDR_LOW) @@ U"000")).resize(xlen)
 
       val extended = Bits(xlen bits)
       extended := shifted
