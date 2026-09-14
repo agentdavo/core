@@ -107,6 +107,12 @@ also why the RTL uses named `Area`s and `setCompositeName` rather than bare
 Everything below is an LFE5U-45F at a 100 MHz target, measured rather than
 estimated, one change at a time.
 
+One caveat, learned the hard way and recorded in the next section: these are
+single placement seeds at a 100 MHz target, and the seed alone is worth around
+eight per cent. Steps 1 and 3 are far larger than that and stand; the smaller
+steps between them are indicative rather than established, and the section
+after this one re-measures the end result properly.
+
 | Step | Change | LUT4 | Routed fmax |
 | --- | --- | --- | --- |
 | 0 | baseline | 34,129 | 13.4 |
@@ -175,59 +181,111 @@ result multiplexers, with the register file down to 7 per cent. That is a
 better problem to have than the one in step 0, and it is the next thing to
 attack.
 
-### Chasing frequency, and what did not work
+### Chasing frequency, and how to measure it
 
 Steps 0 to 7 were logic: find the deep thing, make it shallower. Past step 7
-that stopped working, and the reason is worth writing down, because it changes
-what is worth trying next.
+that stopped working, and the first thing that had to change was not the RTL
+but the method.
 
-At step 7 the critical path was 7.7 ns of logic and 11.1 ns of routing. **The
-core is routing bound, not logic bound.** Driving the logic to zero would still
-leave it at about 90 MHz, so removing multiplexer levels does nothing: the cost
-is the wire between the levels, not the levels.
+**One placement seed is not a measurement.** The same design and the same flow
+measured 54.8 to 60.1 MHz across five seeds, a spread of eight per cent. Three
+conclusions in this document were drawn from single runs and all three were
+wrong: that removing the debug read port was worth ten per cent, that `abc9`
+was worth twenty-four, and that a narrower bypass network was worth trying.
+Everything below is four or five seeds, reported as a mean with its range, and
+nothing inside the noise is called a result.
 
-What makes the wires long is the bypass network. Three read ports, sixty-four
-bits, six sources each means every producer's result has to reach roughly two
-hundred multiplexer inputs, and those inputs are wherever the placer put them.
+**Ask for a target you cannot reach.** nextpnr places against the constraint,
+so asking for 100 MHz and getting 49 is a different experiment from asking for
+200 and getting 57. These are all at 200 MHz on an LFE5U-45F, out of context.
 
-Everything below is the bare core at a 200 MHz target on an LFE5U-45F, so the
-placer works toward a target it cannot reach rather than stopping early. Seed
-noise measured at plus or minus three per cent over three seeds, so anything
-inside that band is not a result.
+Measured like for like, start of the work against the end:
 
-| Change | fmax | Verdict |
-| --- | --- | --- |
-| baseline at this target | 45.94 | |
-| second operand selected in the read stage | 53.19 | kept, +15.8% |
-| `abc9` technology mapping | 57.32 | kept, free |
-| debug read port removed | 60.09 | kept, +9.6% |
-| ALU result multiplexer in five classes | 54.82 | area only, no frequency |
-| base register forwarding removed | 53.17 | **rejected, 13% worse** |
-| a 25k part instead of a 45k | 57.64 | no effect |
-| ALU bypass forward removed entirely | 56.06 | not the constraint |
+| | fmax, mean of 4 seeds | range | LUT4 | Demo cycles |
+| --- | --- | --- | --- | --- |
+| before | 34.0 | 32.9 to 34.9 | 10,544 | 233 |
+| after | 58.7 | 56.9 to 61.0 | 8,644 | 235 |
 
-Four of those are negative results and each killed a plausible theory:
+Seventy-three per cent more clock for one per cent more cycles, and eighteen
+per cent less logic. What produced it, in order of size:
+
+**The register read got its own stage** and the second operand select moved
+into it. With the read, the forwarding and the ALU in one stage the path ran
+RAM output, forwarding multiplexer, ALU, result multiplexer in series. The
+operand select in particular cost four nanoseconds before the adder even
+started, most of it routing a one-bit control signal to sixty-four lanes.
+
+**The multiplier was shaped to the part.** A MULT18X18D multiplies eighteen
+bits by eighteen in one cell; ask for a 33 by 33 product and yosys builds a
+cascade of four with adders between them, measured at 3.9 ns inside the DSP
+and 2.6 routing between its halves. Sixteen-bit limbs plus a sign bit fit one
+cell, so the same sixteen cells now do the work without cascading.
+
+**The shifter was split across two stages.** A 128-bit funnel shift by a
+seven-bit distance is seven multiplexer levels, as deep as the adder beside it.
+Execute does the top three bits of the distance and memory the remaining four,
+carrying seventy-nine bits between them rather than a hundred and twenty-eight.
+A shift became a late result, like a load, which is affordable because shifts
+are rarer than adds. Together with the DSP work this took the ALU from 3,902
+LUT4 to 2,425 and the design from 12,450 to 8,596.
+
+**The trap decode came out of the redirect path.** Once the datapath stopped
+dominating, the critical path left it entirely and became a contract between
+plugins: instruction, trap cause, the throws it drives, every stage's validity,
+whether the branch is firing, the redirect, the fetch generation. Eight of its
+seventeen nanoseconds were deciding whether an instruction traps, in front of a
+branch that cannot trap. Asking a stage's downstream side whether an
+instruction is leaving pulls in every reason it might be cancelled; asking the
+upstream side asks only about backpressure, which is the actual question.
+
+### What did not work, and why it is worth writing down
 
 **Module boundaries do not exist.** The whole core elaborates to one flat
 Verilog module, so there is no synthesis boundary to lose optimisation across.
 
 **Logic depth is not the problem.** Collapsing a nineteen-case result
-multiplexer into five classes bought 0.1 per cent, and under `abc9` it was
-marginally worse, because `abc9` was already restructuring that tree better by
-hand than the hand did.
+multiplexer into five classes bought 0.1 per cent, because `abc9` was already
+restructuring that tree better than the hand did. It is kept for the area.
 
 **The part is not too big.** At 33 per cent utilisation on a 45k it looked like
-the placer had room to spread out. On a 25k at roughly sixty per cent it
-measured the same, so it was not spreading for want of density.
+the placer had room to spread out. On a 25k at roughly sixty it measured the
+same.
 
-**A narrower bypass network is worse, not better.** Removing base register
-forwarding halves the multiplexer inputs on every operand, and it measured 13
-per cent slower as well as costing cycles. The comparators it removes are not
-what the path is made of, and the interlock it adds in their place is. It stays
-a parameter, set the way the measurement says.
+**A narrower bypass network is worse.** Removing base register forwarding
+halves the multiplexer inputs on every operand and measured slower as well as
+costing cycles. It stays a parameter, set the way the measurement says.
 
-The one that did work is the one that removed a whole extra copy of the
-register file: the debug read port, which nothing on a chip needs.
+**Point fixes are finished.** The slack histogram says why. At 58 MHz several
+hundred endpoints sit within 1.5 ns of the critical path, all the same shape:
+register, distributed RAM or multiplexer, two or three more levels, register,
+two thirds of it routing. Removing the worst path exposes the next one, which
+is why taking eight nanoseconds out of the redirect path was worth one per
+cent. Going meaningfully faster now means changing the whole front, not the
+worst path.
+
+### What 200 MHz would take
+
+A 5.0 ns cycle, against measured cell delays from this netlist: 0.5 ns of
+clock to output, 3.4 ns of carry chain for a 64-bit add, 0.2 ns of setup. That
+is 4.1 ns before a single wire or multiplexer, and the adder measures 4.7 in
+place.
+
+**A single-cycle 64-bit add and 200 MHz are not compatible on an ECP5 -6.**
+Not difficult: arithmetically unavailable. Reaching it means an adder split
+across two stages, which makes every dependent instruction pay and changes the
+assumption the rest of the microarchitecture is built on.
+
+What is available, in increasing order of cost: a -8 part, worth fifteen to
+twenty-five per cent and no engineering; removing a register file read port by
+reading store data in memory rather than in the read stage, which attacks the
+fan-out rather than the depth; and a nine or ten stage pipeline with a two
+cycle ALU, which might reach 120 to 150 MHz for perhaps two thirds of the
+instructions per cycle.
+
+If the goal behind the number is throughput rather than clock, the two better
+levers are both already on this roadmap: M9, since the flat encoding was
+justified partly on how cheaply it widens, and caches, since at 58 MHz with a
+one-cycle memory this core is not memory bound yet.
 
 ### The remaining path, and a parameter instead of an argument
 
@@ -255,18 +313,10 @@ and both settings are measured rather than argued about.
 
 ### What is left
 
-The floor for a 64-bit core on this part is the adder. A 64-bit carry chain on
-an ECP5 is around thirty CCU2C in series, so a single-cycle 64-bit add is most
-of a 10 ns cycle on its own. Everything above the adder in the execute stage is
-multiplexing, and that is what the remaining 87 per cent is: a function-wide
-result multiplexer with nineteen inputs, and constant formation sharing it.
-Moving what depends only on the instruction into decode is the cheap half of
-that, and moving the adder into a stage where nothing else shares it is the
-expensive half.
-
-Reaching 100 MHz means the second one, which is another pipeline split rather
-than tidying, and it should wait: a deeper pipeline changes what the memory
-protocol has to tolerate, so the protocol comes first.
+The frequency work has reached the point where the next step is architectural
+rather than an optimisation, and that step is described above. It should wait
+anyway: a deeper pipeline changes what the memory protocol has to tolerate, so
+the protocol comes first.
 
 ## M5 Stallable memory — next
 
