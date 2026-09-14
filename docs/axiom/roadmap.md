@@ -431,6 +431,37 @@ honest statement is that line size is the one parameter here whose measurement
 is an artefact of the memory model, and it should be re-measured against a
 bursting one before anybody picks a number from this table.
 
+### What they cost
+
+The same system with and without them, on an LFE5U-45F. Single seeds, so the
+frequencies are all inside the noise band and none of the differences between
+them is a result; what matters here is the area.
+
+| | LUT4 | DP16KD | Distributed RAM | fmax |
+| --- | --- | --- | --- | --- |
+| no caches | 9,732 | 48 | 192 | 44.1 |
+| 4 kB + 4 kB | 11,381 | 64 | 192 | 43.0 |
+| 1 kB + 4 kB | 11,547 | 56 | 332 | 41.5 |
+
+**The caches are off the critical path.** The core is routing bound at sixty-two
+per cent routing on the same front it was before, and adding two caches to it
+did not move that. Whatever is limiting this design, memory is not it.
+
+**Block RAM costs more than the arithmetic says.** Eight kilobytes of cache is
+sixty-four kilobits, which is four DP16KD, and it takes sixteen. A sixty-four
+bit word with byte enables maps as eight nine-bit slices rather than packing
+densely, so the write granularity the data cache needs costs four times the
+memory the data does.
+
+**The recommended geometry trades one resource for another rather than being
+free.** Dropping the instruction cache from four kilobytes to one saves eight
+block RAMs, which is half of what the caches cost, and it measured identically
+on both workloads. But yosys puts the smaller array in distributed RAM instead,
+so it costs a hundred and forty more of those and a little more logic. On a
+part where block RAM is the scarce resource that is a good trade and on one
+where it is not it is a wash, which is the sort of thing worth knowing before
+choosing rather than after.
+
 ### Three bugs, all needing a memory that answers late
 
 | Bug | Shape |
