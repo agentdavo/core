@@ -16,6 +16,14 @@ import spinal.lib.misc.pipeline._
   * unsigned ones, and every low half is the same either way, so one
   * sign-extension mux covers all four multiply functions.
   */
+object AluKlass {
+  val ARITH  = 0 // the adder, and the W forms of it
+  val LOGIC  = 1 // and, or, xor and their complemented forms
+  val SHIFT  = 2 // the funnel shifter, and the W forms of it
+  val FLAG   = 3 // set-if-less-than, zero or one
+  val MINMAX = 4 // one operand or the other, chosen by the comparison
+}
+
 class AluPlugin extends AxiomPlugin {
 
   val SEL    = Payload(Bool())
@@ -51,6 +59,25 @@ class AluPlugin extends AxiomPlugin {
     * unmodified.
     */
   val SRC_B = Payload(Bits(AxiomParam.XLEN bits))
+
+  /** What kind of result this instruction produces, and the handful of bits
+    * each kind needs, all decided in decode.
+    *
+    * The result used to be a nineteen-case switch on the function code, which
+    * yosys turns into a seven-level multiplexer tree. Measured on an ECP5 that
+    * tree was 8.4 ns of a 17.8 ns execute stage, larger than the 64-bit adder
+    * feeding it, and nine tenths of it was routing between levels rather than
+    * the levels themselves.
+    *
+    * The function encoding was laid out in contiguous groups, so the group is
+    * a fact about the instruction and belongs in decode. Execute is then one
+    * five-way multiplexer over five units, and each unit resolves its own
+    * variant from bits it already has.
+    */
+  val KLASS        = Payload(UInt(3 bits))
+  val IS_WORD      = Payload(Bool())
+  val SUBTRACT     = Payload(Bool())
+  val CMP_UNSIGNED = Payload(Bool())
 
   /** Constant formation, also resolved in decode.
     *
@@ -159,6 +186,32 @@ class AluPlugin extends AxiomPlugin {
       decode(FN) := fn
       decode(USE_IMM) := useImm
 
+      def fnIs(values: Int*): Bool = values.map(v => fn === v).reduce(_ || _)
+
+      val klass = UInt(3 bits)
+      klass := AluKlass.ARITH
+      when(fnIs(Isa.Fn.AND, Isa.Fn.OR, Isa.Fn.XOR, Isa.Fn.ANDN, Isa.Fn.ORN, Isa.Fn.XNOR)) {
+        klass := AluKlass.LOGIC
+      }
+      when(fnIs(Isa.Fn.SHL, Isa.Fn.SHR, Isa.Fn.SAR, Isa.Fn.ROR,
+                Isa.Fn.SHLW, Isa.Fn.SHRW, Isa.Fn.SARW, Isa.Fn.RORW)) {
+        klass := AluKlass.SHIFT
+      }
+      when(fnIs(Isa.Fn.SLT, Isa.Fn.SLTU)) { klass := AluKlass.FLAG }
+      when(fnIs(Isa.Fn.MIN, Isa.Fn.MAX, Isa.Fn.MINU, Isa.Fn.MAXU)) { klass := AluKlass.MINMAX }
+      decode(KLASS) := klass
+
+      decode(IS_WORD) := fnIs(Isa.Fn.ADDW, Isa.Fn.SUBW,
+        Isa.Fn.SHLW, Isa.Fn.SHRW, Isa.Fn.SARW, Isa.Fn.RORW)
+
+      // One adder serves subtraction and both comparisons, so anything that
+      // needs a - b asks for it here.
+      decode(SUBTRACT) := fnIs(Isa.Fn.SUB, Isa.Fn.SUBW, Isa.Fn.SLT, Isa.Fn.SLTU,
+        Isa.Fn.MIN, Isa.Fn.MAX, Isa.Fn.MINU, Isa.Fn.MAXU)
+
+      // SLT and SLTU differ in bit 0; MIN, MAX, MINU and MAXU in bit 1.
+      decode(CMP_UNSIGNED) := Mux(klass === AluKlass.FLAG, fn(0), fn(1))
+
       // The lane, times sixteen. MOVK keeps the mask out of the payloads: the
       // lane index is two bits of the instruction, which execute already has,
       // so rebuilding the mask there is one level of logic and saves carrying
@@ -206,11 +259,46 @@ class AluPlugin extends AxiomPlugin {
     val b = srcB
 
     def sext32(value: Bits): Bits = value(31 downto 0).asSInt.resize(xlen).asBits
-    def flag(condition: Bool): Bits = condition.asBits.resize(xlen)
 
-    val compare = new Area {
-      val lessSigned = a.asSInt < b.asSInt
-      val lessUnsigned = a.asUInt < b.asUInt
+    /** One adder for addition, subtraction and both comparisons.
+      *
+      * Written as three separate expressions, add, subtract and two
+      * comparisons became four independent carry chains: this plugin held 450
+      * CCU2C, seven times what a single 64-bit adder needs. Sharing one chain
+      * is smaller, and it takes three inputs off the result multiplexer.
+      *
+      * The comparison falls out of the subtraction. Unsigned, a is below b
+      * exactly when the subtraction borrows. Signed, operands of different
+      * signs are ordered by a's sign alone, and operands of the same sign
+      * cannot overflow, so the difference's sign is the answer.
+      */
+    val adder = new Area {
+      val subtract = node(SUBTRACT)
+      val operand = b ^ B(xlen bits, default -> subtract)
+      val sum = (a.asUInt +^ operand.asUInt) + subtract.asUInt
+      val difference = sum(xlen - 1 downto 0).asBits
+
+      val borrow = !sum.msb
+      val lessUnsigned = borrow
+      val lessSigned = Mux(a.msb =/= b.msb, a.msb, difference.msb)
+      val less = Mux(node(CMP_UNSIGNED), lessUnsigned, lessSigned)
+    }
+
+    /** Every logic function, as one multiplexer rather than six operations
+      * and a tree. The codes are contiguous from AND at 0x02, so the low three
+      * bits of the function select directly.
+      */
+    val logicUnit = new Area {
+      val result = Bits(xlen bits)
+      result := a & b
+      switch(fn(2 downto 0)) {
+        is(Isa.Fn.AND & 7)  { result := a & b }
+        is(Isa.Fn.OR & 7)   { result := a | b }
+        is(Isa.Fn.XOR & 7)  { result := a ^ b }
+        is(Isa.Fn.ANDN & 7) { result := a & ~b }
+        is(Isa.Fn.ORN & 7)  { result := a | ~b }
+        is(Isa.Fn.XNOR & 7) { result := ~(a ^ b) }
+      }
     }
 
     /** One funnel shifter for all eight shift and rotate functions.
@@ -278,28 +366,25 @@ class AluPlugin extends AxiomPlugin {
       node(PP_LL) := low(mulA) * low(mulB)
     }
 
-    val aluResult = Bits(xlen bits)
-    aluResult := B(0, xlen bits)
-    switch(fn) {
-      is(Isa.Fn.ADD)   { aluResult := (a.asUInt + b.asUInt).asBits }
-      is(Isa.Fn.SUB)   { aluResult := (a.asUInt - b.asUInt).asBits }
-      is(Isa.Fn.AND)   { aluResult := a & b }
-      is(Isa.Fn.OR)    { aluResult := a | b }
-      is(Isa.Fn.XOR)   { aluResult := a ^ b }
-      is(Isa.Fn.ANDN)  { aluResult := a & ~b }
-      is(Isa.Fn.ORN)   { aluResult := a | ~b }
-      is(Isa.Fn.XNOR)  { aluResult := ~(a ^ b) }
-      is(Isa.Fn.SHL, Isa.Fn.SHR, Isa.Fn.SAR, Isa.Fn.ROR) { aluResult := shifter.result }
-      is(Isa.Fn.SHLW, Isa.Fn.SHRW, Isa.Fn.SARW, Isa.Fn.RORW) { aluResult := sext32(shifter.result) }
-      is(Isa.Fn.SLT)   { aluResult := flag(compare.lessSigned) }
-      is(Isa.Fn.SLTU)  { aluResult := flag(compare.lessUnsigned) }
-      is(Isa.Fn.ADDW)  { aluResult := sext32((a.asUInt + b.asUInt).asBits) }
-      is(Isa.Fn.SUBW)  { aluResult := sext32((a.asUInt - b.asUInt).asBits) }
-      is(Isa.Fn.MIN)   { aluResult := Mux(compare.lessSigned, a, b) }
-      is(Isa.Fn.MAX)   { aluResult := Mux(compare.lessSigned, b, a) }
-      is(Isa.Fn.MINU)  { aluResult := Mux(compare.lessUnsigned, a, b) }
-      is(Isa.Fn.MAXU)  { aluResult := Mux(compare.lessUnsigned, b, a) }
+    /** Five units, one multiplexer, and the W narrowing applied once.
+      *
+      * Every W form is its full-width form with the low half sign extended, so
+      * that extension is a single select on the way out rather than a case of
+      * its own for each. MIN and MAX pick an operand rather than computing
+      * one: bit 0 of the function says which way round.
+      */
+    val minmax = Mux(adder.less ^ fn(0), a, b)
+
+    val wide = Bits(xlen bits)
+    wide := adder.difference
+    switch(node(KLASS)) {
+      is(AluKlass.LOGIC)  { wide := logicUnit.result }
+      is(AluKlass.SHIFT)  { wide := shifter.result }
+      is(AluKlass.FLAG)   { wide := adder.less.asBits.resize(xlen) }
+      is(AluKlass.MINMAX) { wide := minmax }
     }
+
+    val aluResult = Mux(node(IS_WORD), sext32(wide), wide)
 
     // ---- constant formation, finished ------------------------------------
     //
