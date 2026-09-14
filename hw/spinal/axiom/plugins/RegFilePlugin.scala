@@ -67,6 +67,14 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       val PortRn = 0; val PortRm = 1; val PortRd = 2; val PortDebug = 3
       val readPorts = 4
 
+      // An asynchronous read alongside a synchronous write is write-first in
+      // the generated Verilog and read-first in an ECP5 distributed RAM, which
+      // would be a real difference if it could be observed. It cannot: the
+      // only cycle the two disagree is one where writeback is writing the
+      // register being read, and that is exactly the cycle the forwarding
+      // select below discards the file's output in favour of the forwarded
+      // value.
+      //
       // setCompositeName rather than setName: a bare name would drop the
       // enclosing plugin and area prefix, and every report that attributes
       // area or delay back to a plugin works off that prefix.
@@ -112,9 +120,11 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       choices.map { case (sel, value) => value & spread(sel) }.reduceBalancedTree(_ | _)
 
     class ResultMux(node: NodeApi, includeLate: Boolean) extends Area {
-      val chosen = sources.filter(source => includeLate || !source.late)
-        .map(source => (node(source.sel), node(source.data))).toSeq
-      val value = if (chosen.isEmpty) B(0, xlen bits) else oneHot(chosen)
+      val value = Bits(xlen bits)
+      value := B(0, xlen bits)
+      for (source <- sources if includeLate || !source.late) {
+        when(node(source.sel)) { value := node(source.data) }
+      }
     }
 
     val forwardLate = AxiomParam.FORWARD_LATE_FROM_WRITEBACK.get
@@ -145,28 +155,24 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       */
     /** One read port, and the forwarding around it.
       *
-      * Priority is resolved on the one-bit selects, which are cheap and
-      * parallel, and only then applied to the 64-bit data as a one-hot
-      * multiplexer. Resolving priority on the data instead would put four
-      * multiplexer levels in series on the critical path.
+      * A chain of conditional assignments, which is a priority multiplexer.
+      * The obvious alternative, resolving priority on the one-bit selects and
+      * then applying them to the data as a one-hot multiplexer, was tried and
+      * measured: 13 per cent more area for 4 per cent more frequency, because
+      * yosys did not merge the mask and OR pairs into single LUT4s. On a part
+      * where the critical path is 62 per cent routing, more area is the wrong
+      * trade, so the shallower form was reverted.
+      *
+      * Assignments run oldest first so the newest producer wins.
       */
     class ReadPort(port: Int, address: UInt) extends Area {
-      val isZero = address === 0
-      val fromMemRd = !isZero && memWritesRd && me.down(Global.RD_ADDR) === address
-      val fromMemBase = !isZero && !fromMemRd && memWritesBase && me.down(Global.RN_ADDR) === address
-      val fromWbRd = !isZero && !fromMemRd && !fromMemBase &&
-        wbHasRd && wb.down(Global.RD_ADDR) === address
-      val fromWbBase = !isZero && !fromMemRd && !fromMemBase && !fromWbRd &&
-        wbHasBase && wb.down(Global.RN_ADDR) === address
-      val fromFile = !isZero && !fromMemRd && !fromMemBase && !fromWbRd && !fromWbBase
-
-      val value = oneHot(Seq(
-        fromMemRd -> memResult,
-        fromMemBase -> me.down(Global.BASE_VALUE),
-        fromWbRd -> wbResult,
-        fromWbBase -> wb.down(Global.BASE_VALUE),
-        fromFile -> storage.read(port, address)
-      ))
+      val value = Bits(xlen bits)
+      value := storage.read(port, address)
+      when(wbHasBase && wb.down(Global.RN_ADDR) === address) { value := wb.down(Global.BASE_VALUE) }
+      when(wbHasRd && wb.down(Global.RD_ADDR) === address) { value := wbResult }
+      when(memWritesBase && me.down(Global.RN_ADDR) === address) { value := me.down(Global.BASE_VALUE) }
+      when(memWritesRd && me.down(Global.RD_ADDR) === address) { value := memResult }
+      when(address === 0) { value := B(0, xlen bits) }
     }
 
     val readRn = new ReadPort(storage.PortRn, ex.down(Global.RN_ADDR))

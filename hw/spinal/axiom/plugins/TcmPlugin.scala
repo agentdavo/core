@@ -35,7 +35,7 @@ class TcmPlugin extends AxiomPlugin with MemoryService {
   }
 
   val logic = during build new Area {
-    val soc = host[InterfaceService]
+    val soc = host[DebugMemoryService]
     val words = AxiomParam.MEM_WORDS.get
     val xlen = AxiomParam.XLEN.get
     val wordAddressBits = log2Up(words)

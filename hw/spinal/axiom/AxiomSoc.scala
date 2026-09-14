@@ -14,8 +14,8 @@ import spinal.lib.misc.plugin.{Hostable, PluginHost}
   */
 object AxiomProfile {
 
-  /** The Base profile on a tightly coupled memory. */
-  def base: Seq[Hostable] = Seq(
+  /** Everything except the memory. */
+  private def core: Seq[Hostable] = Seq(
     new PipelinePlugin,
     new PcPlugin,
     new FetchPlugin,
@@ -28,17 +28,76 @@ object AxiomProfile {
     new BranchPlugin,
     new LsuPlugin,
     new SystemPlugin,
-    new TrapPlugin,
-    new TcmPlugin
+    new TrapPlugin
   )
+
+  /** The Base profile with a tightly coupled memory inside. */
+  def base: Seq[Hostable] = core :+ new TcmPlugin
+
+  /** The Base profile with its buses brought out, for dropping into a larger
+    * system or for synthesising the core on its own.
+    */
+  def bare: Seq[Hostable] = core :+ new ExternalBusPlugin
 }
 
-/** The external interface of an Axiom-64 system.
-  *
-  * Declared as its own bundle so that a plugin can reach it through
-  * [[InterfaceService]] without holding a reference to the component.
+/** A bare Axiom-64 core: everything but the memory, with the two buses
+  * exposed. Same plugins, one swapped.
   */
-case class AxiomIo(memWordAddressBits: Int) extends Bundle {
+class AxiomCore(
+    val resetVector: BigInt = 0,
+    val withMultiplier: Boolean = true,
+    val withAtomics: Boolean = true,
+    val forwardLateFromWriteback: Boolean = true,
+    val plugins: Seq[Hostable] = AxiomProfile.bare
+) extends Component {
+
+  val io = AxiomCoreIo()
+
+  val database = new Database
+
+  val host = database on {
+    // The memory size only matters to a memory plugin, and there is not one
+    // here, but the key is blocking so it still has to be set.
+    AxiomParam.base(resetVector, 4096, withMultiplier, withAtomics, forwardLateFromWriteback)
+    val created = new PluginHost()
+    created.addService(new InterfaceService(io))
+    created.addService(new BusInterfaceService(io.ibus, io.dbus))
+    created.asHostOf(plugins)
+    created
+  }
+}
+
+/** The status and debug signals every Axiom-64 top level exposes.
+  *
+  * A trait rather than a bundle, so the two top levels can lay their own
+  * interfaces out as they like while plugins still reach these through one
+  * service. The bare core adds bus ports; the system adds a debug memory port.
+  */
+trait AxiomStatus {
+  val halted: Bool
+  val trapped: Bool
+  val cause: UInt
+  val trapPc: UInt
+  val cycleCount: UInt
+  val retireCount: UInt
+  val dbgRetireValid: Bool
+  val dbgRetirePc: UInt
+  val dbgRegAddr: UInt
+  val dbgRegData: Bits
+  val dbgPredicates: Bits
+}
+
+/** The debug memory port, present only when the memory is inside the design. */
+trait AxiomDebugMemory {
+  val dbgMemEnable: Bool
+  val dbgMemWrite: Bool
+  val dbgMemAddr: UInt
+  val dbgMemWData: Bits
+  val dbgMemRData: Bits
+}
+
+/** The external interface of an Axiom-64 system with its memory inside. */
+case class AxiomIo(memWordAddressBits: Int) extends Bundle with AxiomStatus with AxiomDebugMemory {
   /** Execution has stopped, on a HALT or on a trap. */
   val halted  = out Bool ()
   val trapped = out Bool ()
@@ -66,13 +125,47 @@ case class AxiomIo(memWordAddressBits: Int) extends Bundle {
   val dbgMemRData  = out Bits (Isa.XLEN bits)
 }
 
+/** The external interface of a bare Axiom-64 core, with its buses exposed.
+  *
+  * This is the shape you drop into a larger system, and it is also the one to
+  * synthesise when the question is how big and how fast the core is: the
+  * tightly coupled memory is thirty-two block RAMs and a great deal of lane
+  * multiplexing, and measuring it alongside the core answers a different
+  * question.
+  */
+case class AxiomCoreIo() extends Bundle with AxiomStatus {
+  val halted  = out Bool ()
+  val trapped = out Bool ()
+  val cause   = out UInt (Isa.Cause.WIDTH bits)
+  val trapPc  = out UInt (Isa.XLEN bits)
+
+  val cycleCount  = out UInt (32 bits)
+  val retireCount = out UInt (32 bits)
+
+  val dbgRetireValid = out Bool ()
+  val dbgRetirePc    = out UInt (Isa.XLEN bits)
+
+  val dbgRegAddr    = in UInt (Isa.REG_ADDR_BITS bits)
+  val dbgRegData    = out Bits (Isa.XLEN bits)
+  val dbgPredicates = out Bits (Isa.PRED_COUNT bits)
+
+  val ibus = master(IBus(Isa.XLEN))
+  val dbus = master(DBus(Isa.XLEN, Isa.XLEN))
+}
+
 /** Handed to the plugin host so plugins can drive the interface.
   *
   * A plain holder rather than the component itself: PluginHost reparents any
   * service that is a hardware context user, and reparenting a component to its
   * own scope makes it its own ancestor.
   */
-class InterfaceService(val io: AxiomIo)
+class InterfaceService(val io: AxiomStatus)
+
+/** Present only when the memory lives inside the design. */
+class DebugMemoryService(val io: AxiomDebugMemory)
+
+/** Present only when the buses leave the design. */
+class BusInterfaceService(val ibus: IBus, val dbus: DBus)
 
 /** An Axiom-64 Base profile core with its memory.
   *
@@ -102,6 +195,7 @@ class AxiomSoc(
     // Registering a holder, not the component, lets a plugin reach the
     // interface without the interface having to know which plugins exist.
     created.addService(new InterfaceService(io))
+    created.addService(new DebugMemoryService(io))
     created.asHostOf(plugins)
     created
   }

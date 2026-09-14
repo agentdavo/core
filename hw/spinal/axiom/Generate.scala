@@ -19,8 +19,17 @@ object GenerateAxiomSoc extends App {
   println("Wrote generated/AxiomSoc.v")
 }
 
+/** The core on its own, buses exposed. The right thing to synthesise when the
+  * question is about the core rather than about its memory.
+  */
+object GenerateAxiomCore extends App {
+  AxiomSpinalConfig().generateVerilog(new AxiomCore())
+  println("Wrote generated/AxiomCore.v")
+}
+
 object GenerateAxiomAll extends App {
   AxiomSpinalConfig().generateVerilog(new AxiomSoc())
+  AxiomSpinalConfig().generateVerilog(new AxiomCore())
   AxiomSpinalConfig().generateVhdl(new AxiomSoc())
   println("Wrote Verilog and VHDL for AxiomSoc into generated/")
 }
