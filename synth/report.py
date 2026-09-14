@@ -41,10 +41,16 @@ def load_report(path):
 
 
 def owner(name: str) -> str:
-    """Charge a signal back to the plugin that created it."""
-    match = PLUGIN.search(name)
-    if match:
-        return match.group(1)
+    """Charge a signal back to the plugin that created it.
+
+    The last plugin name in the string wins, not the first. A payload sitting on
+    a pipeline node is named after the node and then after the plugin that
+    declared the payload, so taking the first match would charge every payload
+    in the core to the pipeline.
+    """
+    matches = PLUGIN.findall(name)
+    if matches:
+        return matches[-1]
     if name.startswith("PipelinePlugin") or "_ctrl_" in name:
         return "PipelinePlugin"
     return "unattributed"

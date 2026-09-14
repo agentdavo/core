@@ -99,49 +99,82 @@ rather than decode, removed the whole class rather than the instance.
 ## Measured on an ECP5
 
 `synth/` runs yosys and nextpnr out of context and attributes every primitive
-and every critical path segment back to the plugin that created it. The first
-pass said this, on an LFE5U-45F at a 100 MHz target:
+and every critical path segment back to the plugin that created it. Attribution
+is only possible because SpinalHDL keeps plugin names on its signals, which is
+also why the RTL uses named `Area`s and `setCompositeName` rather than bare
+`setName`: a bare name drops the prefix every report depends on.
 
-| | Before | After the register file change |
-| --- | --- | --- |
-| LUT4 | 34,129 | 13,375 |
-| Flip-flops | 3,638 | 1,637 |
-| Distributed RAM | 0 | 256 |
-| Routed fmax | not reached | 21.98 MHz |
+Everything below is an LFE5U-45F at a 100 MHz target, measured rather than
+estimated, one change at a time.
 
-Forty per cent of the original core was one register file read path: thirty-two
-64-bit registers in flip-flops with three asynchronous read ports become three
-32-to-1 multiplexers 64 bits wide. Rebuilding it as two distributed RAM banks
-with a live value table, which is how you get two write ports out of
-single-write arrays, removed 61 per cent of the logic on its own.
+| Step | Change | LUT4 | Routed fmax |
+| --- | --- | --- | --- |
+| 0 | baseline | 34,129 | 13.4 |
+| 1 | register file as banked distributed RAM | 13,375 | 21.98 |
+| 2 | one funnel shifter instead of eight, naming fixes | 12,999 | |
+| 3 | multiply split across execute and memory | 12,817 | 28.60 |
+| 4 | predicate false path removed, one-hot multiplexers | 14,530 | 29.79 |
 
-The critical path is now 45.5 ns, of which 19.8 is logic and 25.7 is routing,
-and it runs from a block RAM output through the writeback result mux, forward
-into execute, through the multiplier and back to the register file. The time
-divides as:
+**Step 1** was the big one. Thirty-two 64-bit registers in flip-flops with three
+asynchronous read ports become three 32-to-1 multiplexers 64 bits wide, which
+measured at forty per cent of the core. Distributed RAM has one write port and
+the file needs two, so it uses one bank per write port plus a live value table.
 
-| Plugin | ns | Share |
-| --- | --- | --- |
-| ALU, almost all of it the 64 by 64 multiplier | 23.8 | 52% |
-| Tightly coupled memory read | 11.5 | 25% |
-| Register file writeback mux | 5.3 | 12% |
-| Everything else | 4.9 | 11% |
+**Step 2** replaced eight shifters with one funnel shifter. `{hi, lo} >> n`,
+keeping the low half: choosing what goes in `hi` and `lo` turns one right shift
+into a left shift, an arithmetic shift or a rotate, and placing a 32-bit operand
+in the right half of `lo` covers the W forms too.
 
-That gives a concrete order of work, which is the point of building the flow
-before guessing at cache sizes:
+**Step 3** was the largest frequency win. A 64 by 64 multiply is sixteen DSP
+blocks and a four-level adder tree, and it measured at 23.8 ns of a 45.5 ns
+path: half the cycle, for one instruction. It is now four 33 by 33 partial
+products in execute and the sum in memory, which costs the result one cycle and
+nothing else, because the register file interlock already handles a producer
+whose value is not ready when execute wants it. A multiply became a load.
 
-1. **Pipeline the multiplier.** Sixteen DSP blocks and a four-level adder tree
-   in one cycle is most of the path. The DSP has input and output registers;
-   using them makes multiply a three-cycle operation, which the control links
-   already support through `haltWhen`. Worth roughly 20 ns.
-2. **Register the memory output, or shorten the writeback to execute forward.**
-   Forwarding from writeback into execute chains the block RAM read delay onto
-   the front of the ALU. Worth roughly 10 ns.
-3. **Share one funnel shifter.** The ALU currently builds eight separate
-   shifters for the four shift and rotate forms and their four 32-bit
-   variants. One 128 to 64 funnel shifter does all of them.
+**Step 4** found a false path, which is the kind of thing the flow is for. The
+predicate file forwarded from the execute stage, and the only instruction at
+execute is the reader itself, so that forward could only ever feed an
+instruction its own result. Dead logic, but not free: it chained the compare
+unit's 64-bit comparison straight into the select unit's read, 14 ns of a 35 ns
+path.
 
-Only after that does the pipeline need restructuring rather than tidying.
+The one-hot multiplexers in the same step did not pay: 13 per cent more area for
+4 per cent more frequency, because yosys did not merge the mask and OR pairs as
+hoped. Measured and kept only where the depth is on the critical path.
+
+### The remaining path, and a parameter instead of an argument
+
+After step 4 the path is a block RAM read feeding the multiplier's partial
+products through the writeback-to-execute forward. Forwarding a load's result
+out of writeback chains the memory read, the result multiplexer and the
+forwarding multiplexer onto the front of whatever the consumer does.
+
+Turning that forward off costs a second interlock cycle on a load-use pair. How
+much that costs depends entirely on the code:
+
+| Workload | Forward on | Forward off | Cost |
+| --- | --- | --- | --- |
+| Random programs | 0.85 IPC | 0.85 IPC | under 1% |
+| A loop with a load feeding an add | 0.72 IPC | 0.66 IPC | 8.6% |
+
+The random figure is the misleading one, and finding that out was worth the
+measurement: the generator put address arithmetic in front of every access, so
+producers and consumers almost never landed next to each other. The generator
+now emits explicit dependent pairs, which both fixes the measurement and covers
+a hazard shape it was missing.
+
+`FORWARD_LATE_FROM_WRITEBACK` is therefore a parameter rather than a decision,
+and both settings are measured rather than argued about.
+
+### What is left
+
+The floor for a 64-bit core on this part is the adder. A 64-bit carry chain on
+an ECP5 is around thirty CCU2C in series, so a single-cycle 64-bit add is most
+of a 10 ns cycle on its own. Reaching 100 MHz means the ALU gets a stage to
+itself and nothing else shares it, which is a pipeline split rather than the
+tidying done so far. That is why the next milestone is the memory protocol and
+not more of this.
 
 ## M5 Stallable memory — next
 

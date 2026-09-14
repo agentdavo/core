@@ -41,12 +41,26 @@ object AxiomParam {
   /** When false, the atomic opcodes decode as illegal. */
   val WITH_ATOMICS = Database.blocking[Boolean]()
 
+  /** Whether a late result may be forwarded out of the writeback stage.
+    *
+    * A load's data comes straight off a block RAM, so forwarding it from
+    * writeback chains the memory read, the result multiplexer and the
+    * forwarding multiplexer onto the front of whatever the consumer does. That
+    * is the longest path in the core once the multiplier is out of the way.
+    *
+    * Turning it off costs a second interlock cycle on a load-use pair and buys
+    * back the frequency. Which way round is better depends on the target, so it
+    * is a parameter and both settings are measured rather than argued about.
+    */
+  val FORWARD_LATE_FROM_WRITEBACK = Database.blocking[Boolean]()
+
   /** Fill a database with the Base profile defaults. */
   def base(
       resetVector: BigInt = 0,
       memWords: Int = 4096,
       withMultiplier: Boolean = true,
-      withAtomics: Boolean = true
+      withAtomics: Boolean = true,
+      forwardLateFromWriteback: Boolean = true
   ): Unit = {
     XLEN.set(Isa.XLEN)
     PC_WIDTH.set(Isa.XLEN)
@@ -58,6 +72,7 @@ object AxiomParam {
     MEM_WORDS.set(memWords)
     WITH_MULTIPLIER.set(withMultiplier)
     WITH_ATOMICS.set(withAtomics)
+    FORWARD_LATE_FROM_WRITEBACK.set(forwardLateFromWriteback)
   }
 }
 

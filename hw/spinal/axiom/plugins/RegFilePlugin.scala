@@ -2,6 +2,7 @@ package axiom.plugins
 
 import axiom._
 import spinal.core._
+import spinal.lib._
 import spinal.lib.misc.pipeline._
 import scala.collection.mutable.ArrayBuffer
 
@@ -66,10 +67,13 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       val PortRn = 0; val PortRm = 1; val PortRd = 2; val PortDebug = 3
       val readPorts = 4
 
+      // setCompositeName rather than setName: a bare name would drop the
+      // enclosing plugin and area prefix, and every report that attributes
+      // area or delay back to a plugin works off that prefix.
       val banks = Array.tabulate(2, readPorts) { (write, read) =>
         val bank = Mem(Bits(xlen bits), count)
         bank.init(Seq.fill(count)(B(0, xlen bits)))
-        bank.setName(s"bank_${write}_$read")
+        bank.setCompositeName(this, s"bank_${write}_$read")
         bank
       }
 
@@ -92,23 +96,42 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     /** Mux the registered producers. A late producer's value is meaningless
       * before writeback, so the memory-stage copy leaves them out.
       */
-    def resultAt(node: NodeApi, includeLate: Boolean): Bits = {
-      val value = Bits(xlen bits)
-      value := B(0, xlen bits)
-      for (source <- sources if includeLate || !source.late) {
-        when(node(source.sel)) { value := node(source.data) }
-      }
-      value
+    /** Replicate a single bit across the data path, for one-hot masking. */
+    def spread(bit: Bool): Bits = B(xlen bits, default -> bit)
+
+    /** A one-hot multiplexer built as a balanced OR tree.
+      *
+      * A chain of conditional assignments is a priority multiplexer, and its
+      * depth grows with the number of sources. These selects are mutually
+      * exclusive by construction, so masking and OR-ing is both smaller and
+      * two levels deep instead of five. The result multiplexer sits directly in
+      * the writeback to execute forwarding path, where that depth was costing
+      * about 7 ns.
+      */
+    def oneHot(choices: Seq[(Bool, Bits)]): Bits =
+      choices.map { case (sel, value) => value & spread(sel) }.reduceBalancedTree(_ | _)
+
+    class ResultMux(node: NodeApi, includeLate: Boolean) extends Area {
+      val chosen = sources.filter(source => includeLate || !source.late)
+        .map(source => (node(source.sel), node(source.data))).toSeq
+      val value = if (chosen.isEmpty) B(0, xlen bits) else oneHot(chosen)
     }
 
-    val wbResult  = resultAt(wb.down, includeLate = true)
-    val memResult = resultAt(me.down, includeLate = false)
+    val forwardLate = AxiomParam.FORWARD_LATE_FROM_WRITEBACK.get
+
+    // The commit multiplexer always sees every source; the forwarding copy may
+    // not, because a late source drags a block RAM read into the path.
+    val writebackCommit = new ResultMux(wb.down, includeLate = true)
+    val writebackForward = if (forwardLate) writebackCommit else new ResultMux(wb.down, includeLate = false)
+    val memoryResult = new ResultMux(me.down, includeLate = false)
+    def wbResult = writebackForward.value
+    def memResult = memoryResult.value
 
     // ---- commit ---------------------------------------------------------
     val wbWritesRd = wb.down.isFiring && wb.down(Global.WRITES_RD) && wb.down(Global.RD_ADDR) =/= 0
     val wbWritesBase = wb.down.isFiring && wb.down(Global.WRITES_BASE) && wb.down(Global.RN_ADDR) =/= 0
 
-    storage.write(0, wbWritesRd, wb.down(Global.RD_ADDR), wbResult)
+    storage.write(0, wbWritesRd, wb.down(Global.RD_ADDR), writebackCommit.value)
     storage.write(1, wbWritesBase, wb.down(Global.RN_ADDR), wb.down(Global.BASE_VALUE))
 
     // ---- read and forward, both in execute --------------------------------
@@ -120,35 +143,62 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     /** Assignments run oldest first so the newest producer wins: the memory
       * stage holds a younger instruction than the writeback stage does.
       */
-    def readForwarded(port: Int, address: UInt): Bits = {
-      val value = Bits(xlen bits)
-      value := storage.read(port, address)
-      when(wbHasBase && wb.down(Global.RN_ADDR) === address) { value := wb.down(Global.BASE_VALUE) }
-      when(wbHasRd && wb.down(Global.RD_ADDR) === address) { value := wbResult }
-      when(memWritesBase && me.down(Global.RN_ADDR) === address) { value := me.down(Global.BASE_VALUE) }
-      when(memWritesRd && me.down(Global.RD_ADDR) === address) { value := memResult }
-      when(address === 0) { value := B(0, xlen bits) }
-      value
+    /** One read port, and the forwarding around it.
+      *
+      * Priority is resolved on the one-bit selects, which are cheap and
+      * parallel, and only then applied to the 64-bit data as a one-hot
+      * multiplexer. Resolving priority on the data instead would put four
+      * multiplexer levels in series on the critical path.
+      */
+    class ReadPort(port: Int, address: UInt) extends Area {
+      val isZero = address === 0
+      val fromMemRd = !isZero && memWritesRd && me.down(Global.RD_ADDR) === address
+      val fromMemBase = !isZero && !fromMemRd && memWritesBase && me.down(Global.RN_ADDR) === address
+      val fromWbRd = !isZero && !fromMemRd && !fromMemBase &&
+        wbHasRd && wb.down(Global.RD_ADDR) === address
+      val fromWbBase = !isZero && !fromMemRd && !fromMemBase && !fromWbRd &&
+        wbHasBase && wb.down(Global.RN_ADDR) === address
+      val fromFile = !isZero && !fromMemRd && !fromMemBase && !fromWbRd && !fromWbBase
+
+      val value = oneHot(Seq(
+        fromMemRd -> memResult,
+        fromMemBase -> me.down(Global.BASE_VALUE),
+        fromWbRd -> wbResult,
+        fromWbBase -> wb.down(Global.BASE_VALUE),
+        fromFile -> storage.read(port, address)
+      ))
     }
 
-    ex.down(Global.RS_N) := readForwarded(storage.PortRn, ex.down(Global.RN_ADDR))
-    ex.down(Global.RS_M) := readForwarded(storage.PortRm, ex.down(Global.RM_ADDR))
-    ex.down(Global.RS_D) := readForwarded(storage.PortRd, ex.down(Global.RD_ADDR))
+    val readRn = new ReadPort(storage.PortRn, ex.down(Global.RN_ADDR))
+    val readRm = new ReadPort(storage.PortRm, ex.down(Global.RM_ADDR))
+    val readRd = new ReadPort(storage.PortRd, ex.down(Global.RD_ADDR))
+
+    ex.down(Global.RS_N) := readRn.value
+    ex.down(Global.RS_M) := readRm.value
+    ex.down(Global.RS_D) := readRd.value
 
     // ---- the load-use interlock -------------------------------------------
-    val lateAtMemory = sources.filter(_.late)
-      .map(source => me.down(source.sel)).reduceOption(_ || _).getOrElse(False)
+    def lateAt(node: CtrlLink): Bool = sources.filter(_.late)
+      .map(source => node.down(source.sel)).reduceOption(_ || _).getOrElse(False)
 
-    val memoryRd = me.down(Global.RD_ADDR)
-    val consumerNeedsIt =
-      (ex.down(Global.READS_RN) && ex.down(Global.RN_ADDR) === memoryRd) ||
-      (ex.down(Global.READS_RM) && ex.down(Global.RM_ADDR) === memoryRd) ||
-      (ex.down(Global.READS_RD) && ex.down(Global.RD_ADDR) === memoryRd)
+    def consumerNeeds(destination: UInt): Bool =
+      (ex.down(Global.READS_RN) && ex.down(Global.RN_ADDR) === destination) ||
+      (ex.down(Global.READS_RM) && ex.down(Global.RM_ADDR) === destination) ||
+      (ex.down(Global.READS_RD) && ex.down(Global.RD_ADDR) === destination)
+
+    def blockedBy(node: CtrlLink): Bool = {
+      val destination = node.down(Global.RD_ADDR)
+      node.isValid && lateAt(node) && node.down(Global.WRITES_RD) &&
+        destination =/= 0 && consumerNeeds(destination)
+    }
 
     // Guarded on the up nodes rather than the down ones, because halting
     // clears down.valid and reading it back here would close a loop.
-    val interlock = ex.isValid && me.isValid && lateAtMemory &&
-      me.down(Global.WRITES_RD) && memoryRd =/= 0 && consumerNeedsIt
+    //
+    // With writeback forwarding of late results turned off, a consumer has to
+    // wait for the producer to commit, which is one cycle further.
+    val blocked = if (forwardLate) blockedBy(me) else blockedBy(me) || blockedBy(wb)
+    val interlock = ex.isValid && blocked
 
     ex.haltWhen(interlock)
 

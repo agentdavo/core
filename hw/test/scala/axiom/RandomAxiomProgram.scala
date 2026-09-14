@@ -121,7 +121,8 @@ object RandomAxiomProgram {
         Seq.fill(3 + memoryBias * 4)("mem") ++ Seq.fill(1 + memoryBias)("pair") ++
         Seq.fill(1 + memoryBias)("atomic") ++ Seq.fill(1)("ordered") ++
         Seq.fill(3)("branch") ++ Seq.fill(1)("jump") ++ Seq.fill(1)("call") ++
-        Seq.fill(1)("indirect") ++ Seq.fill(1)("pcrel")
+        Seq.fill(1)("indirect") ++ Seq.fill(1)("pcrel") ++
+        Seq.fill(2 + memoryBias)("dependent")
 
     for (i <- 0 until groups) {
       label(s"g$i")
@@ -219,6 +220,30 @@ object RandomAxiomProgram {
 
         case "pcrel" =>
           addpc(destReg(), (rng.nextInt(2048) - 1024) * 4)
+
+        case "dependent" =>
+          // A producer whose result is consumed by the very next instruction.
+          // Left to chance this shape almost never appears, because the address
+          // arithmetic in front of every memory access separates producers from
+          // consumers. It is also the shape that arms the interlock, so without
+          // it the generator exercises neither the stall nor the cost of one.
+          val target = scratchReg()
+          val consumer = destReg()
+          rng.nextInt(3) match {
+            case 0 =>
+              formAddress(target, Isa.SIZE_D)
+              val loaded = { val r = destReg(); if (r == target) (if (target == 1) 2 else 1) else r }
+              ldd(loaded, target, rng.nextInt(16) * 8)
+              registerOps(rng.nextInt(registerOps.length))._2(asm, consumer, loaded, anyReg())
+            case 1 =>
+              mul(target, anyReg(), anyReg())
+              registerOps(rng.nextInt(registerOps.length))._2(asm, consumer, target, anyReg())
+            case _ =>
+              formAddress(target, Isa.SIZE_W)
+              val loaded = { val r = destReg(); if (r == target) (if (target == 1) 2 else 1) else r }
+              ldadd(loaded, target, anyReg(), Isa.SIZE_W)
+              addi(consumer, loaded, smallImm())
+          }
 
         case _ =>
           bl(forwardLabel())

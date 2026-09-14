@@ -86,6 +86,7 @@ class AxiomSoc(
     val resetVector: BigInt = 0,
     val withMultiplier: Boolean = true,
     val withAtomics: Boolean = true,
+    val forwardLateFromWriteback: Boolean = true,
     val plugins: Seq[Hostable] = AxiomProfile.base
 ) extends Component {
 
@@ -96,7 +97,7 @@ class AxiomSoc(
   val database = new Database
 
   val host = database on {
-    AxiomParam.base(resetVector, memWords, withMultiplier, withAtomics)
+    AxiomParam.base(resetVector, memWords, withMultiplier, withAtomics, forwardLateFromWriteback)
     val created = new PluginHost()
     // Registering a holder, not the component, lets a plugin reach the
     // interface without the interface having to know which plugins exist.

@@ -36,7 +36,6 @@ class PredicateFilePlugin extends AxiomPlugin with PredicateService {
   val logic = during build new Area {
     val preds = Vec.fill(AxiomParam.PRED_COUNT.get)(Reg(Bool()) init False)
 
-    val ex = ctrl(Stages.EXECUTE)
     val me = ctrl(Stages.MEMORY)
     val wb = ctrl(Stages.WRITEBACK)
 
@@ -48,19 +47,25 @@ class PredicateFilePlugin extends AxiomPlugin with PredicateService {
 
     val wbValue = valueAt(wb.down)
     val memValue = valueAt(me.down)
-    val exValue = valueAt(ex.down)
 
     val wbWrites = wb.down.isFiring && wb.down(Global.WRITES_PD)
     when(wbWrites) { preds(wb.down(Global.PD_ADDR)) := wbValue }
 
-    // Read at execute, where select and branch both live, so all three
-    // in-flight producers have to be forwarded. Oldest first, newest wins.
+    // Read at execute, forwarding from memory and writeback only.
+    //
+    // Deliberately not from execute. A predicate read happens at execute, and
+    // the only instruction at execute is the reader itself, so an execute-stage
+    // forward could only ever feed an instruction its own result. It is dead
+    // logic, but it is not free: it chains the compare unit's 64-bit
+    // comparison straight into the select unit's read, and that false path
+    // measured at 14 ns of a 35 ns critical path.
+    //
+    // Oldest first, newest wins.
     reader.load((address: UInt) => {
       val value = Bool()
       value := preds(address)
       when(wbWrites && wb.down(Global.PD_ADDR) === address) { value := wbValue }
       when(me.isValid && me.down(Global.WRITES_PD) && me.down(Global.PD_ADDR) === address) { value := memValue }
-      when(ex.isValid && ex.down(Global.WRITES_PD) && ex.down(Global.PD_ADDR) === address) { value := exValue }
       value
     })
 
