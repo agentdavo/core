@@ -198,6 +198,11 @@ class LsuPlugin extends AxiomPlugin {
       val kind = new Kind(node(Global.INSTRUCTION))
       node(SEL_LOAD) := node(SEL) && kind.isLoad
       node(SEL_ATOMIC) := node(SEL) && kind.isAtomic
+
+      // A single store hands its data straight to the bus two stages after
+      // reading it, so it is the one instruction that can start before that
+      // data exists. Everything else computes with what it reads.
+      node(Global.LATE_RD) := node(SEL) && kind.isSingleStore
     }
 
     // =================================================================
@@ -346,9 +351,47 @@ class LsuPlugin extends AxiomPlugin {
 
       node(ATOMIC_OLD) := atomic.old
 
+      /** The store data that was not ready when the store went past.
+        *
+        * The interlock lets a single store past a producer still in execute,
+        * on the understanding that the store collects the value here, where
+        * that producer has reached writeback. Three cases, and the third is
+        * why there is a register:
+        *
+        *  - writeback is not writing this register: nothing was skipped and
+        *    what the read stage read is the value.
+        *  - it is, and the value is there: take it.
+        *  - it is, and the value is not there yet, because the producer is a
+        *    load still waiting on memory. Then the store waits too. The
+        *    producer leaves writeback the moment its data lands, so the value
+        *    is caught in a register on the way past rather than read again
+        *    from a stage that no longer holds it.
+        */
+      val late = new Area {
+        val wanted = node.isValid && node.up(Global.LATE_RD)
+        val forward = host[RegFileService].lateForward(node.up(Global.RD_ADDR))
+
+        val held = Reg(Bits(xlen bits)) init 0
+        val have = Reg(Bool()) init False
+        when(wanted && forward.hit && forward.ready && !have) {
+          held := forward.value
+          have := True
+        }
+        // One collection per instruction, whichever way it leaves.
+        when(node.down.isMoving) { have := False }
+
+        val waiting = wanted && forward.hit && !forward.ready && !have
+        val value = Mux(have, held, Mux(forward.hit, forward.value, node(Global.RS_D)))
+      }
+
+      // The stage holds, and the command below is not offered either: a
+      // command accepted now would carry whatever the read stage happened to
+      // read.
+      node.haltWhen(late.waiting)
+
       // ---- bus drive ----------------------------------------------------
       val storeData = Bits(xlen bits)
-      storeData := node(Global.RS_D)
+      storeData := late.value
       when(kind.isStorePair && beat) { storeData := node(Global.RS_M) }
       when(kind.isAtomic) { storeData := atomic.newValue }
 
@@ -370,7 +413,7 @@ class LsuPlugin extends AxiomPlugin {
       val compareFailed = kind.isAtomic && beat && !atomic.commits
       val wantsCommand = active && !compareFailed
 
-      bus.enable := wantsCommand && !issued && !stillOwed && !bufferBusy
+      bus.enable := wantsCommand && !issued && !stillOwed && !bufferBusy && !late.waiting
       bus.write := kind.isStore || (kind.isAtomic && beat && atomic.commits)
       bus.address := address.resized
       bus.wdata := (storeData.asUInt << bitShift).resize(xlen).asBits

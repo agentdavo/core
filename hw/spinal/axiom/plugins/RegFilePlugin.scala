@@ -61,6 +61,24 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     perfInterlock = host[PerfService].newCounter("interlock")
   }
 
+  /** What writeback is producing, offered to the memory stage.
+    *
+    * A Handle because a consumer asks for it in its own build, which may run
+    * before this one. The comparison against the address wanted is built where
+    * it is asked for; what is published here is the one producer there can be.
+    */
+  private case class LateSource(writes: Bool, address: UInt, ready: Bool, value: Bits)
+  private val lateSource = spinal.core.fiber.Handle[LateSource]()
+
+  override def lateForward(address: UInt): LateForward = {
+    val source = lateSource.get
+    LateForward(
+      hit = source.writes && source.address === address && address =/= 0,
+      ready = source.ready,
+      value = source.value
+    )
+  }
+
   val logic = during build new Area {
     val xlen = AxiomParam.XLEN.get
     val count = AxiomParam.REG_COUNT.get
@@ -240,10 +258,20 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       }
       .reduceOption(_ || _).getOrElse(False)
 
-    def consumerNeeds(destination: UInt): Bool =
+    /** @param exemptLateRd whether an instruction that takes its `rd` operand
+      *        in the memory stage may be let past a producer in execute. It
+      *        may, and only past that one: by the time it reaches memory, that
+      *        producer is in writeback, which is where it collects the value
+      *        from. A producer in memory or writeback is further ahead and
+      *        will have committed and gone by then, leaving nothing to collect
+      *        and a stale operand, so those still hold the consumer here.
+      */
+    def consumerNeeds(destination: UInt, exemptLateRd: Boolean = false): Bool = {
+      val late = if (exemptLateRd) rd.down(Global.LATE_RD) else False
       (rd.down(Global.READS_RN) && rd.down(Global.RN_ADDR) === destination) ||
       (rd.down(Global.READS_RM) && rd.down(Global.RM_ADDR) === destination) ||
-      (rd.down(Global.READS_RD) && rd.down(Global.RD_ADDR) === destination)
+      (rd.down(Global.READS_RD) && rd.down(Global.RD_ADDR) === destination && !late)
+    }
 
     /** @param owesBase a base write this instruction has not performed yet.
       *        Read from the upstream side in memory and writeback, because a
@@ -252,10 +280,11 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       *        side is held across both passes, so it says what the instruction
       *        as a whole still owes, which is the question being asked.
       */
-    def blockedBy(node: CtrlLink, upTo: Int, owesBase: Bool): Bool = {
+    def blockedBy(node: CtrlLink, upTo: Int, owesBase: Bool,
+                  exemptLateRd: Boolean = false): Bool = {
       val destination = node.down(Global.RD_ADDR)
       val primary = unavailableAt(node, upTo) && node.down(Global.WRITES_RD) &&
-        destination =/= 0 && consumerNeeds(destination)
+        destination =/= 0 && consumerNeeds(destination, exemptLateRd)
 
       // A second register this instruction has promised to write but has not
       // reached yet. There is no value to forward and no stage at which one
@@ -281,13 +310,25 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     // memory has not returned its data yet, and with writeback forwarding of
     // those turned off a consumer has to wait for the producer to commit.
     val blocked =
-      blockedBy(ex, Stages.EXECUTE, ex.down(Global.WRITES_BASE)) ||
+      blockedBy(ex, Stages.EXECUTE, ex.down(Global.WRITES_BASE), exemptLateRd = true) ||
         blockedBy(me, Stages.MEMORY, me.up(Global.WRITES_BASE)) ||
         blockedBy(wb, forwardFromWriteback, wb.up(Global.WRITES_BASE))
     val interlock = rd.isValid && blocked
 
     rd.haltWhen(interlock)
     perfInterlock := interlock && rd.down.isReady
+
+    // ---- the late collection point -----------------------------------------
+    // The same three facts the read stage's forwarding uses, asked of the
+    // writeback stage alone and one stage later. Nothing here is a second
+    // bypass network: there is one source, one comparator and one multiplexer,
+    // because only one instruction can be the producer.
+    lateSource.load(LateSource(
+      writes = wbHasRd,
+      address = wb.down(Global.RD_ADDR),
+      ready = !unavailableAt(wb, Stages.WRITEBACK),
+      value = writebackCommit.value
+    ))
 
     // ---- debug -------------------------------------------------------------
     // A combinational peek at the committed file, for simulation and bring-up.

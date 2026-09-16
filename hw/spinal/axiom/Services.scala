@@ -93,7 +93,30 @@ trait RegFileService {
       availableAt: Int = Stages.EXECUTE,
       ready: Handle[Bool] = null
   ): Unit
+
+  /** What writeback is producing for `address`, for a consumer in the memory
+    * stage that was let past the interlock without its operand.
+    *
+    * Only the instruction exactly one stage ahead can be writing a register a
+    * memory-stage instruction read, because nothing overtakes anything: an
+    * older producer has already committed and a younger one has not been read.
+    * So a hit here is always the producer the interlock would otherwise have
+    * waited for.
+    *
+    * Only valid to call from a plugin's build phase.
+    */
+  def lateForward(address: UInt): LateForward
 }
+
+/** The answer to [[RegFileService.lateForward]].
+  *
+  * @param hit   writeback is writing this register, so what was read in the
+  *              read stage is stale and this is the value to use
+  * @param ready the value is on hand this cycle. A load behind a cache is in
+  *              writeback long before its data is, and a consumer that asked
+  *              late has to wait exactly as the interlock would have.
+  */
+case class LateForward(hit: Bool, ready: Bool, value: Bits)
 
 /** The predicate register file. */
 trait PredicateService {

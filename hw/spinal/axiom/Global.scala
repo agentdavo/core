@@ -47,6 +47,22 @@ object Global extends AreaObject {
     */
   val READS_RD = Payload(Bool())
 
+  /** The `rd` operand is not needed until the memory stage.
+    *
+    * A store's data is the one operand in the machine that nothing computes
+    * with: it is handed to the bus two stages after it is read. So a store may
+    * start while the instruction that produces its data is still in execute,
+    * and pick the value up in memory, where that producer has reached
+    * writeback. The register file's interlock reads this to know it may let
+    * the store past, and the load/store unit reads it to know it has to
+    * collect the value rather than trust what it read.
+    *
+    * It applies to a single store only. A pair's second half reads `rm`, and
+    * an atomic computes with its operand, so both want it when everything else
+    * does.
+    */
+  val LATE_RD = Payload(Bool())
+
   // -- register file read data -------------------------------------------
   val RS_N = Payload(Bits(AxiomParam.XLEN bits))
   val RS_M = Payload(Bits(AxiomParam.XLEN bits))
