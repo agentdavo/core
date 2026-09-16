@@ -159,6 +159,29 @@ class AxiomHazardSpec extends AxiomSpec {
     assert(r.word(DataWord + 2) == 0x99, "address base forwarded from a load")
   }
 
+  test("a load pair feeding the store right after it") {
+    // A store may start before the instruction producing its data has one,
+    // and collect the value in the memory stage. A load pair is the producer
+    // that cannot be treated that way: it writes its two registers on two
+    // passes, and by the time the store is in memory the pass in writeback is
+    // naming the other register. The store has to wait for it as it always
+    // did, and this is the program that says whether it does.
+    val r = cosim(readRange = DataWord until (DataWord + 6)) { a =>
+      import a._
+      li(s0, DataByte)
+      li(t0, 0x1111)
+      li(t1, 0x2222)
+      stp(t0, t1, s0, 0)
+      ldp(t2, t3, s0, 0)
+      std(t2, s0, 16) // the pair's first register, straight into a store
+      ldp(t4, t5, s0, 0)
+      std(t5, s0, 24) // and its second
+      halt()
+    }
+    assert(r.word(DataWord + 2) == 0x1111, "the pair's first register reached the store")
+    assert(r.word(DataWord + 3) == 0x2222, "the pair's second register reached the store")
+  }
+
   test("back to back loads, and a load whose address came from a load") {
     val r = cosim() { a =>
       import a._

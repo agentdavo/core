@@ -266,8 +266,8 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       *        will have committed and gone by then, leaving nothing to collect
       *        and a stale operand, so those still hold the consumer here.
       */
-    def consumerNeeds(destination: UInt, exemptLateRd: Boolean = false): Bool = {
-      val late = if (exemptLateRd) rd.down(Global.LATE_RD) else False
+    def consumerNeeds(destination: UInt, exemptLateRd: Bool = False): Bool = {
+      val late = exemptLateRd && rd.down(Global.LATE_RD)
       (rd.down(Global.READS_RN) && rd.down(Global.RN_ADDR) === destination) ||
       (rd.down(Global.READS_RM) && rd.down(Global.RM_ADDR) === destination) ||
       (rd.down(Global.READS_RD) && rd.down(Global.RD_ADDR) === destination && !late)
@@ -283,8 +283,19 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     def blockedBy(node: CtrlLink, upTo: Int, owesBase: Bool,
                   exemptLateRd: Boolean = false): Bool = {
       val destination = node.down(Global.RD_ADDR)
+
+      /** A pair is not exempt, whichever of its two registers is wanted.
+        *
+        * A load pair goes through memory and writeback twice, and the second
+        * pass renames `rd` to the second register. A consumer let past it
+        * arrives in memory while the second pass is in writeback, finds the
+        * name it is looking for is not the one there, concludes nothing is
+        * being written and uses what it read before the pair wrote anything.
+        * So a producer that writes twice holds it here as it always did.
+        */
+      val exempt = if (exemptLateRd) !node.down(Global.WRITES_RM) else False
       val primary = unavailableAt(node, upTo) && node.down(Global.WRITES_RD) &&
-        destination =/= 0 && consumerNeeds(destination, exemptLateRd)
+        destination =/= 0 && consumerNeeds(destination, exempt)
 
       // A second register this instruction has promised to write but has not
       // reached yet. There is no value to forward and no stage at which one

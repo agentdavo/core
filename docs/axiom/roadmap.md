@@ -687,6 +687,39 @@ Behind 4 kB caches over a memory of latency eight:
 | sum-of-squares | 348 | 276 |
 | straight-line | 888 | 840 |
 
+### What it cost on the part
+
+Four seeds each at a 200 MHz target on an LFE5U-45F, out of context, the core
+with its buses brought out. The baseline is the same core at the commit this
+work started from, generated and placed the same way, because the 58.7 MHz in
+the frequency section above belongs to a core with no caches and no divider and
+is not the thing to compare against.
+
+| | fmax, 4 seeds | range | LUT4 | Flip-flops |
+| --- | --- | --- | --- | --- |
+| before | 44.1 | 40.6 to 45.4 | 10,740 | 3,347 |
+| after | 49.0 | 46.4 to 53.9 | 11,870 | 3,647 |
+| after, counters left out | 48.6 | 47.5 to 49.3 | 11,360 | 3,417 |
+
+Ten per cent more logic and, if anything, slightly more clock. Taken with the
+cycle counts, memcpy does the same work in about 1.6 times fewer seconds.
+
+**The counters are free in time and cost about five hundred LUT4.** They were
+not free when first built: the critical path went from a stall signal in one
+plugin, across the part, into a thirty-two bit carry chain, and the whole core
+measured at 42 MHz. Sampling the event into a register beside the counter fixed
+it, which is the general lesson — instrumentation that reads a signal from
+somewhere else should register it before doing anything with it — and the
+parameter to leave them out stays, because five hundred LUT4 is real on a small
+part.
+
+**The critical path is now the load/store unit reaching the program counter**,
+four nanoseconds of logic and seventeen of routing, in every seed of every
+variant. That is the arbitration chain: a stall in the memory stage propagating
+back through the pipeline's ready network into the branch redirect. It is the
+next thing to restructure, and being eighty per cent routing it wants a
+structural change rather than a shallower expression.
+
 ### Three bugs that needed a memory able to answer and accept at once
 
 All three were latent and unreachable while the memory refused a command on the
