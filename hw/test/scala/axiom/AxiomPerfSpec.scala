@@ -72,6 +72,26 @@ class AxiomPerfSpec extends AxiomSpec {
     assert(squares.event("interlock") > 0, "a load-use pair should interlock")
   }
 
+  /** Cycles that no counter claims, which is the branch shadow: the
+    * instructions thrown between a redirect and the front end catching up.
+    */
+  private def shadow(result: RunResult): Long = {
+    val stalls = Seq("fetch", "interlock", "load", "issue", "divide").map(result.event).sum
+    result.cycles - result.retired - stalls
+  }
+
+  test("a loop's backward branch costs one instruction, not three") {
+    // A conditional branch resolved in execute throws the three instructions
+    // behind it. Predicted in decode, a taken one throws one. The loop here
+    // closes with a backward conditional branch taken every iteration but the
+    // last, so almost every redirect it makes should cost a single cycle.
+    val result = measure(AxiomWorkloads.straightLine, AxiomSim.soc)
+    val redirects = result.event("redirect")
+    assert(redirects > 50, "the loop should redirect once per iteration")
+    assert(shadow(result) < redirects * 2,
+      s"${shadow(result)} shadow cycles for $redirects redirects: the prediction is not holding")
+  }
+
   test("cycle accounting behind caches") {
     val rows = AxiomWorkloads.all.map(w => w -> measure(w, AxiomSim.socCached))
     report("Axiom-64, 4 kB caches over a memory of latency 8", rows)
