@@ -27,6 +27,27 @@ class AxiomCacheSpec extends AxiomSpec {
       assert(plain.retireTrace == cached.retireTrace, "a different instruction stream retired")
     }
 
+  /** A store whose data is the load right before it, through a cold cache.
+    *
+    * The store is let past the interlock on the promise that it collects its
+    * data in the memory stage, and behind a cache that data is tens of cycles
+    * away: the store waits in memory and catches the value as the load leaves
+    * writeback. Every line here misses, so every one of these pairs takes that
+    * path, and a tightly coupled memory takes the other one.
+    */
+  sameAnswers("a load feeding the store after it, with the data far away") { a =>
+    import a._
+    li(s0, DataByte)
+    li(s1, DataByte + 1024)
+    for (i <- 0 until 8) {
+      ldd(a0, s0, i * 64)
+      std(a0, s1, i * 64)
+      ldb(a1, s0, i * 64)
+      stb(a1, s1, i * 64 + 8)
+    }
+    halt()
+  }
+
   sameAnswers("arithmetic, so only the instruction cache is exercised") { a =>
     import a._
     li(a0, 1)
