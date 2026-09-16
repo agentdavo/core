@@ -55,6 +55,12 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       ready: spinal.core.fiber.Handle[Bool] = null
   ): Unit = sources += Source(sel, data, availableAt, ready)
 
+  private var perfInterlock: Bool = null
+
+  val setupLogic = during setup new Area {
+    perfInterlock = host[PerfService].newCounter("interlock")
+  }
+
   val logic = during build new Area {
     val xlen = AxiomParam.XLEN.get
     val count = AxiomParam.REG_COUNT.get
@@ -281,6 +287,7 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     val interlock = rd.isValid && blocked
 
     rd.haltWhen(interlock)
+    perfInterlock := interlock && rd.down.isReady
 
     // ---- debug -------------------------------------------------------------
     // A combinational peek at the committed file, for simulation and bring-up.

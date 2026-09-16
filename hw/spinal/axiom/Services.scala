@@ -155,3 +155,85 @@ trait MemoryService {
 trait BackingMemoryService {
   def newBackingPort(): DBus
 }
+
+/** The events a performance counter can count.
+  *
+  * The list is fixed and the index of each event is part of the debug
+  * interface, so that a test bench can ask for a counter by index without
+  * knowing which plugins were built. A plugin that does not exist in a given
+  * profile simply leaves its counter at zero, which reads the same way as an
+  * event that never happened, and is the truth in both cases.
+  *
+  * Every counter here answers one question: how many cycles did the machine
+  * spend not retiring an instruction, and whose fault was it? The sum of the
+  * stall counters plus the retired count plus the flush shadow accounts for
+  * the whole run, which is what makes the numbers worth having: an
+  * optimisation that moves cycles from one counter to another has not made the
+  * program faster.
+  */
+object PerfEvent {
+
+  /** Decode had no instruction to decode. Instruction memory's fault. */
+  val FETCH = 0
+
+  /** Read held an instruction whose operand was not ready yet. */
+  val INTERLOCK = 1
+
+  /** Writeback waited for load data. */
+  val LOAD = 2
+
+  /** Memory waited for the data bus to accept a command. A load and a store
+    * both wait here, which is why this is not called the store counter: it is
+    * the cost of getting a command in, where [[LOAD]] is the cost of waiting
+    * for the answer to one.
+    */
+  val ISSUE = 3
+
+  /** Execute held an instruction while the divider iterated. */
+  val DIVIDE = 4
+
+  /** A redirect was taken; everything younger was thrown. */
+  val REDIRECT = 5
+
+  /** A line was fetched into the instruction cache. */
+  val ICACHE_MISS = 6
+
+  /** A line was fetched into the data cache. */
+  val DCACHE_MISS = 7
+
+  val NAMES: Seq[String] = Seq(
+    "fetch", "interlock", "load", "issue", "divide", "redirect",
+    "icache-miss", "dcache-miss"
+  )
+
+  val COUNT: Int = NAMES.size
+
+  def index(name: String): Int = {
+    val at = NAMES.indexOf(name)
+    require(at >= 0, s"'$name' is not a performance event; known events are ${NAMES.mkString(", ")}")
+    at
+  }
+}
+
+/** Cycle accounting.
+  *
+  * A plugin that can stall the pipeline says so here rather than being counted
+  * from outside, because only the plugin knows which of the several reasons it
+  * might be holding a stage is the one that applies. What comes back is a Bool
+  * to drive high on every cycle the event happens; the counting, the width and
+  * the way the result leaves the design are none of the caller's business.
+  */
+trait PerfService {
+
+  /** Allocate the counter for `name`, which must be one of [[PerfEvent]]'s.
+    *
+    * The returned Bool has no driver and wants exactly one: a counter claimed
+    * and left undriven is an elaboration error rather than a zero that reads
+    * like a measurement. A plugin that only sometimes has anything to count
+    * claims the counter only in those builds, or drives it False.
+    *
+    * Each event has one owner. Claiming the same one twice is a mistake, since
+    * two plugins each counting half a reason produce a number that is neither.
+    */
+  def newCounter(name: String): Bool
+}

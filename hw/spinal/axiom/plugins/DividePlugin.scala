@@ -24,12 +24,17 @@ class DividePlugin extends AxiomPlugin {
   val SEL    = Payload(Bool())
   val RESULT = Payload(Bits(AxiomParam.XLEN bits))
 
+  private var perfDivide: Bool = null
+
   val setupLogic = during setup new Area {
     // The opcode is claimed either way, so that a build without a divider
     // rejects it here rather than leaving it to fall through as undefined.
     // The result is only offered when there is something to produce it.
     host[DecoderService].claim(SEL, Seq(Isa.ALU_DIV), subFunctionLegal)
-    if (AxiomParam.WITH_DIVIDER.get) host[RegFileService].addResult(SEL, RESULT)
+    if (AxiomParam.WITH_DIVIDER.get) {
+      host[RegFileService].addResult(SEL, RESULT)
+      perfDivide = host[PerfService].newCounter("divide")
+    }
   }
 
   /** A build without a divider rejects the whole opcode, so the forms raise
@@ -78,7 +83,9 @@ class DividePlugin extends AxiomPlugin {
     // Held until the answer exists: not started yet, or started and still
     // working. The divider reports busy from the edge after it is asked, which
     // is why both halves are needed rather than just the second.
-    node.haltWhen(active && (!started || unit.io.busy))
+    val waiting = active && (!started || unit.io.busy)
+    node.haltWhen(waiting)
+    perfDivide := waiting && node.down.isReady
 
     node(RESULT) := Mux(fn(1), unit.io.remainder, unit.io.quotient)
     }

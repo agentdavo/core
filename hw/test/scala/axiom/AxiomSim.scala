@@ -14,8 +14,17 @@ case class RunResult(
     regs: Array[Long],
     predicates: Int,
     memory: Map[Int, Long],
-    retireTrace: Seq[Long]
+    retireTrace: Seq[Long],
+    perf: Map[String, Long] = Map.empty
 ) {
+  /** A performance counter by [[PerfEvent]] name. */
+  def event(name: String): Long =
+    perf.getOrElse(name, throw new NoSuchElementException(s"no counter named '$name'"))
+
+  /** The counters that are not zero, in the order the events are numbered. */
+  def events: Seq[(String, Long)] =
+    PerfEvent.NAMES.filter(name => perf.getOrElse(name, 0L) != 0L).map(name => name -> perf(name))
+
   def reg(i: Int): Long = regs(i)
   def predicate(i: Int): Boolean = ((predicates >> i) & 1) != 0
 
@@ -173,6 +182,7 @@ object AxiomSim {
       dut.io.dbgMemAddr #= 0
       dut.io.dbgMemWData #= 0
       dut.io.dbgRegAddr #= 0
+      dut.io.dbgPerfSelect #= 0
 
       dut.clockDomain.forkStimulus(period = 10)
       SimTimeout(10L * (maxCycles + packed.length + data.size + 4 * MemWords + 1000))
@@ -235,6 +245,18 @@ object AxiomSim {
       val retired = dut.io.retireCount.toLong
       val predicates = dut.io.dbgPredicates.toInt
 
+      // The counter port is registered, so the value read belongs to the index
+      // presented on the cycle before. Two samplings per index rather than
+      // bookkeeping the pipelining: this runs once at the end of a program.
+      val perf = scala.collection.mutable.LinkedHashMap[String, Long]()
+      for ((name, index) <- PerfEvent.NAMES.zipWithIndex) {
+        dut.io.dbgPerfSelect #= index
+        dut.clockDomain.waitSampling()
+        dut.clockDomain.waitSampling()
+        perf(name) = dut.io.dbgPerfCount.toLong
+      }
+      dut.io.dbgPerfSelect #= 0
+
       val regs = new Array[Long](Isa.REG_COUNT)
       for (i <- 0 until Isa.REG_COUNT) {
         dut.io.dbgRegAddr #= i
@@ -258,7 +280,7 @@ object AxiomSim {
       }
 
       result = RunResult(didHalt, trapped, cause, trapPc, cycles, retired, regs, predicates,
-        memory.toMap, trace.toSeq)
+        memory.toMap, trace.toSeq, perf.toMap)
     }
 
     result

@@ -22,6 +22,8 @@ class CachePlugin extends AxiomPlugin with MemoryService {
   private var dataPort: DBus = null
   private var instructionBacking: DBus = null
   private var dataBacking: DBus = null
+  private var perfIcacheMiss: Bool = null
+  private var perfDcacheMiss: Bool = null
 
   override def newInstructionPort(): IBus = {
     require(instructionPort == null, "there is one instruction port")
@@ -42,6 +44,10 @@ class CachePlugin extends AxiomPlugin with MemoryService {
     val backing = host[BackingMemoryService]
     instructionBacking = backing.newBackingPort()
     dataBacking = backing.newBackingPort()
+    // Claimed whether or not a cache is built. A port with no cache behind it
+    // never misses, which is the truth, and the counter reads zero.
+    perfIcacheMiss = host[PerfService].newCounter("icache-miss")
+    perfDcacheMiss = host[PerfService].newCounter("dcache-miss")
   }
 
   /** Explicit rather than `<>`: the port handed out by the memory behind is a
@@ -71,14 +77,16 @@ class CachePlugin extends AxiomPlugin with MemoryService {
       * rather than against a different memory, which is the only comparison
       * that says what it is worth.
       */
-    def cacheOrNot(bytes: Int, writes: Boolean, core: DBus, backing: DBus): Unit = {
+    def cacheOrNot(bytes: Int, writes: Boolean, core: DBus, backing: DBus, miss: Bool): Unit = {
       if (bytes == 0) {
         connect(core, backing)
+        miss := False
       } else {
         val unit = CacheUnit(bytes = bytes, lineBytes = lineBytes,
           memoryBytes = memoryBytes, writes = writes)
         connect(core, unit.io.core)
         connect(unit.io.memory, backing)
+        miss := unit.io.refillStart
       }
     }
 
@@ -96,7 +104,8 @@ class CachePlugin extends AxiomPlugin with MemoryService {
     instructionPort.ready := instructionWide.ready
     instructionPort.rvalid := instructionWide.rvalid
 
-    cacheOrNot(AxiomParam.ICACHE_BYTES.get, writes = false, instructionWide, instructionBacking)
+    cacheOrNot(AxiomParam.ICACHE_BYTES.get, writes = false, instructionWide, instructionBacking,
+      perfIcacheMiss)
 
     val instructionAccepted = instructionPort.enable && instructionWide.ready
     val instructionHigh = RegNextWhen(instructionPort.address(2), instructionAccepted) init False
@@ -104,6 +113,6 @@ class CachePlugin extends AxiomPlugin with MemoryService {
       instructionWide.rdata(xlen - 1 downto 32), instructionWide.rdata(31 downto 0))
 
     // ---- data side --------------------------------------------------------
-    cacheOrNot(AxiomParam.DCACHE_BYTES.get, writes = true, dataPort, dataBacking)
+    cacheOrNot(AxiomParam.DCACHE_BYTES.get, writes = true, dataPort, dataBacking, perfDcacheMiss)
   }
 }

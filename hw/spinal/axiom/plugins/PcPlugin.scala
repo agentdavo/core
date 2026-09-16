@@ -26,6 +26,12 @@ class PcPlugin extends AxiomPlugin with PcService {
     port
   }
 
+  private var perfRedirect: Bool = null
+
+  val setupLogic = during setup new Area {
+    perfRedirect = host[PerfService].newCounter("redirect")
+  }
+
   /** A Handle so a plugin may ask before this one has built. */
   private val generation = spinal.core.fiber.Handle[UInt]()
 
@@ -62,6 +68,7 @@ class PcPlugin extends AxiomPlugin with PcService {
     when(anyRedirect) {
       gen := gen + 1
     }
+    perfRedirect := anyRedirect
 
     // Kill the branch shadow. Every instruction already inside the pipeline
     // and younger than the redirecting one needs an explicit throw, because it

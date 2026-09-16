@@ -92,6 +92,8 @@ class LsuPlugin extends AxiomPlugin {
 
   private var trap: TrapCmd = null
   private var bus: DBus = null
+  private var perfLoad: Bool = null
+  private var perfIssue: Bool = null
 
   /** True on the cycles a load's data is actually on hand. Read by the
     * register file's interlock, which is why it is a Handle: it is claimed in
@@ -108,6 +110,8 @@ class LsuPlugin extends AxiomPlugin {
       ready = loadDataReady)
     host[RegFileService].addResult(SEL_ATOMIC, ATOMIC_OLD, availableAt = Stages.WRITEBACK)
     trap = host[TrapService].newTrapPort()
+    perfLoad = host[PerfService].newCounter("load")
+    perfIssue = host[PerfService].newCounter("issue")
   }
 
   /** Shared classification of an opcode, used in three different stages. */
@@ -377,7 +381,9 @@ class LsuPlugin extends AxiomPlugin {
       when(accepted) { issued := True }
       when(node.down.isMoving) { issued := False }
 
-      node.haltWhen(wantsCommand && !issued && !accepted)
+      val waiting = wantsCommand && !issued && !accepted
+      node.haltWhen(waiting)
+      perfIssue := waiting && node.down.isReady
     }
 
     // =================================================================
@@ -391,7 +397,9 @@ class LsuPlugin extends AxiomPlugin {
       // A load is the only thing here that is owed an answer. Everything else
       // passes straight through, so a store never waits for memory twice.
       val expectsData = node.isValid && node(SEL) && kind.isLoad
-      node.haltWhen(expectsData && !response.present)
+      val waiting = expectsData && !response.present
+      node.haltWhen(waiting)
+      perfLoad := waiting && node.down.isReady
       // isMoving for the same reason it is used in the fetch buffer: a
       // cancelled transaction issued its command all the same, and the answer
       // it is owed has to be taken out of the way.

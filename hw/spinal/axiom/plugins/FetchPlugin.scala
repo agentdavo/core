@@ -31,9 +31,11 @@ import spinal.lib.misc.pipeline._
 class FetchPlugin extends AxiomPlugin {
 
   private var bus: IBus = null
+  private var perfFetch: Bool = null
 
   val setupLogic = during setup new Area {
     bus = host[MemoryService].newInstructionPort()
+    perfFetch = host[PerfService].newCounter("fetch")
   }
 
   val logic = during build new Area {
@@ -81,6 +83,11 @@ class FetchPlugin extends AxiomPlugin {
 
     decodeNode.up(Global.INSTRUCTION) := buffer.word
     decodeNode.haltWhen(!buffer.present)
+
+    // Counted only when decode could otherwise have moved, so that a cycle
+    // lost to something deeper in the pipeline is charged to that instead of
+    // being counted twice.
+    perfFetch := !buffer.present && decodeNode.down.isReady
 
     /** The command, and the outstanding-response bookkeeping. */
     val command = new Area {

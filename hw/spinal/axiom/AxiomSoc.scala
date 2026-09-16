@@ -29,7 +29,8 @@ object AxiomProfile {
     new LsuPlugin,
     new DividePlugin,
     new SystemPlugin,
-    new TrapPlugin
+    new TrapPlugin,
+    new PerfPlugin
   )
 
   /** The Base profile with a tightly coupled memory inside. */
@@ -102,6 +103,8 @@ trait AxiomStatus {
   val dbgRegAddr: UInt
   val dbgRegData: Bits
   val dbgPredicates: Bits
+  val dbgPerfSelect: UInt
+  val dbgPerfCount: UInt
 }
 
 /** The debug memory port, present only when the memory is inside the design. */
@@ -134,6 +137,12 @@ case class AxiomIo(memWordAddressBits: Int) extends Bundle with AxiomStatus with
   val dbgRegData    = out Bits (Isa.XLEN bits)
   val dbgPredicates = out Bits (Isa.PRED_COUNT bits)
 
+  /** Performance counters, read one at a time by [[PerfEvent]] index. The
+    * value appears one cycle after the index is presented.
+    */
+  val dbgPerfSelect = in UInt (log2Up(PerfEvent.COUNT) bits)
+  val dbgPerfCount  = out UInt (32 bits)
+
   /** Debug memory port. While enabled it owns the data side of the memory. */
   val dbgMemEnable = in Bool ()
   val dbgMemWrite  = in Bool ()
@@ -165,6 +174,12 @@ case class AxiomCoreIo() extends Bundle with AxiomStatus {
   val dbgRegAddr    = in UInt (Isa.REG_ADDR_BITS bits)
   val dbgRegData    = out Bits (Isa.XLEN bits)
   val dbgPredicates = out Bits (Isa.PRED_COUNT bits)
+
+  /** Performance counters, read one at a time by [[PerfEvent]] index. The
+    * value appears one cycle after the index is presented.
+    */
+  val dbgPerfSelect = in UInt (log2Up(PerfEvent.COUNT) bits)
+  val dbgPerfCount  = out UInt (32 bits)
 
   val ibus = master(IBus(Isa.XLEN))
   val dbus = master(DBus(Isa.XLEN, Isa.XLEN))

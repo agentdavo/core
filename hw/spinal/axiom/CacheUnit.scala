@@ -59,6 +59,11 @@ case class CacheUnit(
   val io = new Bundle {
     val core = slave(DBus(addressWidth, dataWidth))
     val memory = master(DBus(addressWidth, dataWidth))
+
+    /** One pulse per line fetched. Purely an observation port: nothing inside
+      * reads it, and a build that does not count it leaves it dangling.
+      */
+    val refillStart = out Bool ()
   }
 
   def indexOf(a: UInt): UInt = a(offsetBits + indexBits - 1 downto offsetBits)
@@ -144,6 +149,7 @@ case class CacheUnit(
   }
 
   // ---- the miss -----------------------------------------------------------
+  io.refillStart := lookup.miss && !refill.active
   when(lookup.miss && !refill.active) {
     refill.active := True
     refill.address := lookup.address
