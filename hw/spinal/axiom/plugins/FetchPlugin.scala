@@ -42,6 +42,15 @@ class FetchPlugin extends AxiomPlugin {
     val fetchNode = ctrl(Stages.FETCH)
     val decodeNode = ctrl(Stages.DECODE)
 
+    /** Whether a response is still on its way.
+      *
+      * Declared before the buffer because both halves need it: the command
+      * side will not ask twice while one is owed, and the buffer has to know
+      * whether a transaction that leaves without its word leaves one behind.
+      */
+    val outstanding = Reg(Bool()) init False
+    val stillOwed = outstanding && !bus.rvalid
+
     /** The one-deep response buffer, decode's wait on it, and the answer
       * nobody is left to take.
       *
@@ -59,6 +68,14 @@ class FetchPlugin extends AxiomPlugin {
       * cache the wait is tens of cycles and a redirect lands in the middle of
       * it, so one orphan is remembered and the response it belongs to is
       * dropped when it arrives.
+      *
+      * Only a transaction that is actually owed something leaves an orphan.
+      * A transaction thrown after its word was taken owes nothing, and
+      * remembering an orphan for it eats the next real answer instead: the
+      * transaction that asked for it waits forever, and the word that
+      * eventually arrives belongs to a different address than the program
+      * counter beside it. Every instruction after that point is decoded
+      * against the wrong address, which is how it shows up.
       */
     val buffer = new Area {
       val data = Reg(Bits(Isa.INSTR_BITS bits)) init 0
@@ -74,11 +91,28 @@ class FetchPlugin extends AxiomPlugin {
 
       val leaving = decodeNode.up.isMoving
       val taken = leaving && present
-      val abandoned = leaving && !present
+
+      /** A transaction that leaves without its word leaves an answer behind.
+        *
+        * `owed` is filled in below, once the command side knows whether one
+        * was accepted this cycle: a transaction reaches decode on the cycle
+        * its command is accepted, and the register that records that it is
+        * outstanding does not read back until the cycle after. Arming the
+        * orphan from that register alone misses exactly the transaction that
+        * is thrown on the cycle it arrives, and then the answer it left turns
+        * up, is handed to the next transaction, and every instruction after
+        * that point is decoded against the wrong address.
+        */
+      val owed = Bool()
+      val abandoned = leaving && !present && owed
 
       when(usable) { data := bus.data }
       full := (full || usable) && !taken
-      orphan := (orphan || abandoned) && !bus.rvalid
+
+      // A response arriving now settles the orphan that was waiting for it,
+      // but a new one armed this cycle belongs to a later answer and outlives
+      // it.
+      orphan := abandoned || (orphan && !bus.rvalid)
     }
 
     decodeNode.up(Global.INSTRUCTION) := buffer.word
@@ -91,8 +125,6 @@ class FetchPlugin extends AxiomPlugin {
 
     /** The command, and the outstanding-response bookkeeping. */
     val command = new Area {
-      val outstanding = Reg(Bool()) init False
-      val stillOwed = outstanding && !bus.rvalid
       val bufferBusy = buffer.full && !buffer.taken
 
       bus.address := fetchNode.up(Global.PC)
@@ -107,7 +139,17 @@ class FetchPlugin extends AxiomPlugin {
         !stillOwed && !bufferBusy
 
       val accepted = bus.enable && bus.ready
-      outstanding := (outstanding || accepted) && !bus.rvalid
+      // A command accepted on the cycle the previous answer arrives is still
+      // owed an answer of its own. Clearing on the response first and setting
+      // on acceptance second is the difference between one command in flight
+      // and two, and with two the answers stop lining up with the
+      // transactions waiting for them: the second instruction is handed to
+      // the first transaction and every instruction after that is decoded
+      // against the wrong address. A memory that refused a command on the
+      // cycle it answered made that unreachable, which is why it took a
+      // pipelined one to find it.
+      outstanding := (outstanding && !bus.rvalid) || accepted
+      buffer.owed := stillOwed || accepted
 
       // The only reason fetch ever holds a transaction. Every other stage's
       // backpressure reaches it through the buffer being busy, which stops the

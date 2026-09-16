@@ -21,38 +21,61 @@ class CacheUnitSpec extends AnyFunSuite {
       .compile(CacheUnit(bytes = bytes, lineBytes = lineBytes,
         memoryBytes = MemoryBytes, writes = true))
 
-  /** Drive the memory side: accept a command, wait, answer. One at a time,
-    * which is what the cache is entitled to assume.
+  private val Mask64 = (BigInt(1) << 64) - 1
+
+  /** Drive the memory side: accept a command, wait, answer.
+    *
+    * Called once per cycle immediately after the clock edge. It looks at the
+    * command the cache is offering in this cycle against the ready it was
+    * given for this cycle, and then presents what the memory offers in the
+    * next one. Sampling the command before the edge reads the previous
+    * cycle's value instead, which did not matter while the cache held a
+    * command up until it was answered, and did the moment it stopped: a
+    * refill that asks for its words back to back had every second command
+    * ignored, and waited forever for answers to commands the memory never saw.
+    *
+    * One command at a time, which is the least a memory may do. The cache asks
+    * for a whole line without waiting for the words in front, so it has to
+    * cope with a memory that takes them one by one; the pipelined case is
+    * [[BackingRam]]'s to prove.
     */
   private class Memory(dut: CacheUnit, latency: Int, contents: Array[Long]) {
-    var countdown = 0
-    var reading = false
-    var address = 0
+    private var remaining = 0
+    private var reading = false
+    private var address = 0
+
+    /** The ready the cache is being shown in the cycle now running. */
+    private var offering = false
+
+    present()
+
+    private def present(): Unit = {
+      offering = remaining <= 1
+      dut.io.memory.ready #= offering
+      val responds = remaining == 1 && reading
+      dut.io.memory.rvalid #= responds
+      if (responds) dut.io.memory.rdata #= BigInt(contents(address)) & Mask64
+    }
 
     def tick(): Unit = {
-      dut.io.memory.ready #= countdown == 0
-      dut.io.memory.rvalid #= false
-      if (countdown > 0) {
-        countdown -= 1
-        if (countdown == 0 && reading) {
-          dut.io.memory.rvalid #= true
-          dut.io.memory.rdata #= BigInt(contents(address)) & ((BigInt(1) << 64) - 1)
-        }
-      } else if (dut.io.memory.enable.toBoolean) {
+      if (offering && dut.io.memory.enable.toBoolean) {
         address = (dut.io.memory.address.toBigInt.toInt / 8) % Words
         reading = !dut.io.memory.write.toBoolean
         if (!reading) {
           val data = dut.io.memory.wdata.toBigInt
           val mask = dut.io.memory.mask.toBigInt.toInt
-          var value = BigInt(contents(address)) & ((BigInt(1) << 64) - 1)
+          var value = BigInt(contents(address)) & Mask64
           for (b <- 0 until 8 if (mask & (1 << b)) != 0) {
             val shift = b * 8
             value = (value & ~(BigInt(0xff) << shift)) | (((data >> shift) & 0xff) << shift)
           }
           contents(address) = value.toLong
         }
-        countdown = latency
+        remaining = latency
+      } else if (remaining > 0) {
+        remaining -= 1
       }
+      present()
     }
   }
 
@@ -68,8 +91,8 @@ class CacheUnitSpec extends AnyFunSuite {
     var answer: BigInt = null
     var spent = 0
     while (answer == null) {
-      memory.tick()
       dut.clockDomain.waitSampling()
+      memory.tick()
       if (!accepted && dut.io.core.ready.toBoolean) {
         accepted = true
         dut.io.core.enable #= false
@@ -91,15 +114,15 @@ class CacheUnitSpec extends AnyFunSuite {
     var spent = 0
     var accepted = false
     while (!accepted) {
-      memory.tick()
       dut.clockDomain.waitSampling()
+      memory.tick()
       if (dut.io.core.ready.toBoolean) accepted = true
       spent += 1
       assert(spent < 500, "the cache never took the store")
     }
     dut.io.core.enable #= false
-    memory.tick()
     dut.clockDomain.waitSampling()
+    memory.tick()
   }
 
   private def scenario(name: String, bytes: Int, lineBytes: Int, latency: Int)
@@ -107,18 +130,18 @@ class CacheUnitSpec extends AnyFunSuite {
     test(s"$name (${bytes}B cache, ${lineBytes}B line, $latency cycle memory)") {
       compiled(bytes, lineBytes, latency).doSim(seed = 42) { dut =>
         val contents = Array.tabulate(Words)(i => 0x1000L + i)
-        val memory = new Memory(dut, latency, contents)
         dut.io.core.enable #= false
         dut.io.core.write #= false
         dut.io.core.address #= 0
         dut.io.core.wdata #= 0
         dut.io.core.mask #= 0
-        dut.io.memory.ready #= true
-        dut.io.memory.rvalid #= false
         dut.io.memory.rdata #= 0
+        // Presents the memory's idle state as it is built, so nothing is
+        // driven twice and nothing is left undriven.
+        val memory = new Memory(dut, latency, contents)
         dut.clockDomain.forkStimulus(10)
         SimTimeout(200000)
-        dut.clockDomain.waitSampling(4)
+        for (_ <- 0 until 4) { dut.clockDomain.waitSampling(); memory.tick() }
         body(dut, memory, contents)
       }
     }

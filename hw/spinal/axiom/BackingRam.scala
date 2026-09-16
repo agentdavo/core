@@ -10,12 +10,29 @@ import spinal.lib._
   * between the two, and a handshake is much easier to watch from outside than
   * to infer from a wrong register three hundred cycles later.
   *
-  * It answers `latency` cycles after taking a command and refuses commands
-  * while it is working, which is what an off-chip part or a shared
-  * interconnect does and what makes a cache worth having. Each port gets its
-  * own read on the array rather than sharing one through an arbiter; that is
-  * what an on-chip dual-port SRAM gives for free, and an arbiter here would
-  * measure the arbiter rather than the cache.
+  * It answers `latency` cycles after taking a command. Reads are pipelined:
+  * a command may be accepted every cycle and the answers come back in order,
+  * `latency` cycles behind. That is what an off-chip part with a fixed access
+  * time does, and it is the difference between a line refill costing the
+  * latency once and costing it per word. The first version of this memory
+  * refused a command while it was working, and the cache measurements made
+  * with it said longer lines were worse, which was a fact about this model
+  * rather than about caches.
+  *
+  * A write takes the memory to itself. It is accepted like anything else, held
+  * in a register, and applied once the reads already in flight have been
+  * answered; nothing further is accepted until it has finished. A write that
+  * overtook a read in flight would answer that read with data from after it,
+  * and the point of a memory model is that it is obviously right.
+  *
+  * Holding the write rather than refusing it is not a detail. Whether a
+  * command is accepted must not depend on what the command is: the cache asks
+  * to write only while the memory says it may, so a ready that looked at the
+  * write bit closed a combinational loop through both.
+  *
+  * Each port gets its own read on the array rather than sharing one through an
+  * arbiter; that is what an on-chip dual-port SRAM gives for free, and an
+  * arbiter here would measure the arbiter rather than the cache.
   *
   * There is one write port, and whichever channel is writing drives it. Two
   * write statements on one array are two write ports, which a block RAM does
@@ -58,32 +75,77 @@ case class BackingRam(
   val debugActive = if (withDebug) io.debug.enable else False
 
   val channel = for ((bus, index) <- io.port.zipWithIndex) yield new Area {
-    val counter = Reg(UInt(log2Up(latency + 1) bits)) init 0
-    val busy = counter =/= 0
-    val reading = Reg(Bool()) init False
+
+    /** Reads in flight, youngest at the top. Entry zero answers this cycle.
+      *
+      * The address travels down the pipeline rather than the data, because the
+      * data is sixty-four bits and the address is twelve: delaying the answer
+      * would cost seven registers of data per cycle of latency, and delaying
+      * the question costs seven registers of address. The array read is issued
+      * one cycle before the answer is due, which is what a synchronous memory
+      * needs, and the rest of the wait is just the address sitting still.
+      */
+    val inFlight = Vec.fill(latency)(Reg(Bool()) init False)
+    val pending = Vec.fill(latency)(Reg(UInt(wordAddressBits bits)) init 0)
+    val anyInFlight = inFlight.reduce(_ || _)
+
+    /** The write waiting for the reads in front of it, and then for the
+      * latency a write costs.
+      */
+    val held = new Area {
+      val valid = Reg(Bool()) init False
+      val address = Reg(UInt(wordAddressBits bits)) init 0
+      val value = Reg(Bits(dataWidth bits)) init 0
+      val mask = Reg(Bits(dataWidth / 8 bits)) init 0
+    }
+    val writeLeft = Reg(UInt(log2Up(latency + 1) bits)) init 0
+    val writeBusy = held.valid || writeLeft =/= 0
+    when(writeLeft =/= 0) { writeLeft := writeLeft - 1 }
 
     // The debug access takes the array over while it is enabled, which is only
     // meant to happen with the core in reset or halted.
-    val accepted = bus.enable && !busy && !debugActive
-    bus.ready := !busy && !debugActive
-
-    when(accepted) {
-      counter := latency
-      reading := !bus.write
-    }
-    when(busy) { counter := counter - 1 }
-
-    bus.rvalid := (counter === 1) && reading
+    val blocked = writeBusy || debugActive
+    val accepted = bus.enable && !blocked
+    bus.ready := !blocked
 
     val writing = accepted && bus.write
     val reads = accepted && !bus.write
     val index_ = wordIndex(bus.address)
 
+    when(writing) {
+      held.valid := True
+      held.address := index_
+      held.value := bus.wdata
+      held.mask := bus.mask
+    }
+
+    /** Applied once nothing older is still on its way back. */
+    val applying = held.valid && !anyInFlight
+    when(applying) {
+      held.valid := False
+      writeLeft := latency
+    }
+
+    for (slot <- 0 until latency - 1) {
+      inFlight(slot) := inFlight(slot + 1)
+      pending(slot) := pending(slot + 1)
+    }
+    inFlight(latency - 1) := reads
+    when(reads) { pending(latency - 1) := index_ }
+
+    bus.rvalid := inFlight(0)
+
+    // With a latency of one there is no pipeline to walk: the answer is due
+    // the cycle after the command, so the array read is issued with it.
+    val issuing = if (latency > 1) inFlight(1) else reads
+    val issueAddress = if (latency > 1) pending(1) else index_
+
     // Channel zero's address and read enable are shared with the debug access,
     // which takes the array over while it is enabled.
     val borrowed = withDebug && index == 0
-    val readAddress = if (borrowed) Mux(debugActive, io.debug.address, index_) else index_
-    val readEnable = if (borrowed) debugActive || reads else reads
+    val readAddress =
+      if (borrowed) Mux(debugActive, io.debug.address, issueAddress) else issueAddress
+    val readEnable = if (borrowed) debugActive || issuing else issuing
 
     val readData = ram.readSync(address = readAddress, enable = readEnable)
     bus.rdata := readData
@@ -94,7 +156,7 @@ case class BackingRam(
     * debug access when it has the array.
     */
   val writer = new Area {
-    val fromChannel = channel.map(_.writing).reduce(_ || _)
+    val fromChannel = channel.map(_.applying).reduce(_ || _)
     val address = UInt(wordAddressBits bits)
     val value = Bits(dataWidth bits)
     val mask = Bits(dataWidth / 8 bits)
@@ -102,11 +164,11 @@ case class BackingRam(
     address := 0
     value := 0
     mask := B(dataWidth / 8 bits, default -> True)
-    for ((c, bus) <- channel.zip(io.port)) {
-      when(c.writing) {
-        address := wordIndex(bus.address)
-        value := bus.wdata
-        mask := bus.mask
+    for (c <- channel) {
+      when(c.applying) {
+        address := c.held.address
+        value := c.held.value
+        mask := c.held.mask
       }
     }
 

@@ -82,13 +82,25 @@ case class CacheUnit(
   val refill = new Area {
     val active = Reg(Bool()) init False
     val address = Reg(UInt(addressWidth bits)) init 0
+
+    /** Two pointers, not one.
+      *
+      * The memory behind takes a command every cycle and answers in order, so
+      * the whole line is asked for while the first answer is still on its way.
+      * With one pointer each word waited for the one before it and a four word
+      * line cost four times the memory's latency; with two it costs the
+      * latency once. `issue` says how much has been asked for and `word` where
+      * the next answer goes.
+      */
+    val issue = Reg(UInt(wordBits bits)) init 0
+    val asking = Reg(Bool()) init False
     val word = Reg(UInt(wordBits bits)) init 0
-    val issued = Reg(Bool()) init False
     val captured = Reg(Bits(dataWidth bits)) init 0
     val done = Reg(Bool()) init False
 
     val wanted = wordOf(address)
     val last = word === (lineWords - 1)
+    val lastIssue = issue === (lineWords - 1)
   }
 
   // ---- the lookup, one cycle behind the command ---------------------------
@@ -154,7 +166,8 @@ case class CacheUnit(
     refill.active := True
     refill.address := lookup.address
     refill.word := 0
-    refill.issued := False
+    refill.issue := 0
+    refill.asking := True
     lineValid(lookup.index) := False
   }
 
@@ -163,7 +176,6 @@ case class CacheUnit(
     arrayWrite.address := indexOf(refill.address) @@ refill.word
     arrayWrite.value := io.memory.rdata
     when(refill.word === refill.wanted) { refill.captured := io.memory.rdata }
-    refill.issued := False
     refill.word := refill.word + 1
     when(refill.last) {
       refill.active := False
@@ -214,15 +226,18 @@ case class CacheUnit(
 
   // ---- the port on the memory behind --------------------------------------
   val refillAddress = refill.address(addressWidth - 1 downto offsetBits) @@
-    refill.word @@ U(0, 3 bits)
+    refill.issue @@ U(0, 3 bits)
   val storeNow = if (writes) io.core.enable && io.core.write && ready else False
 
-  io.memory.enable := (refill.active && !refill.issued) || storeNow
+  io.memory.enable := (refill.active && refill.asking) || storeNow
   io.memory.write := storeNow
   io.memory.address := Mux(refill.active, refillAddress.resized, io.core.address)
   io.memory.wdata := io.core.wdata
   io.memory.mask := io.core.mask
-  when(refill.active && !refill.issued && io.memory.ready) { refill.issued := True }
+  when(refill.active && refill.asking && io.memory.ready) {
+    refill.issue := refill.issue + 1
+    when(refill.lastIssue) { refill.asking := False }
+  }
 
   // ---- the response -------------------------------------------------------
   val hitResponse = lookup.valid && !lookup.write && lookup.hit

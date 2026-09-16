@@ -104,6 +104,17 @@ object AxiomParam {
   val DCACHE_BYTES = Database.blocking[Int]()
   val CACHE_LINE_BYTES = Database.blocking[Int]()
 
+  /** Whether the cycle accounting counters are built.
+    *
+    * They are how this project decides what to optimise next, so a simulation
+    * build always has them. On a real part they are eight thirty-two bit
+    * counters fed from a stall signal in every plugin, which is a wide
+    * multiplexer and a long wire to reach it; measured on an ECP5 they were
+    * the critical path. A build being measured for frequency leaves them out,
+    * and then the numbers describe the core rather than its instrumentation.
+    */
+  val WITH_PERF_COUNTERS = Database.blocking[Boolean]()
+
   /** A combinational read port on the register file for the test bench.
     *
     * It is a whole extra copy of every RAM bank and nothing on a real chip
@@ -122,6 +133,7 @@ object AxiomParam {
       forwardLateFromWriteback: Boolean = true,
       forwardBase: Boolean = true,
       withDebugRegFilePort: Boolean = true,
+      withPerfCounters: Boolean = true,
       memoryStall: Int = 0,
       memoryLatency: Int = 1,
       icacheBytes: Int = 4096,
@@ -142,6 +154,7 @@ object AxiomParam {
     FORWARD_LATE_FROM_WRITEBACK.set(forwardLateFromWriteback)
     FORWARD_BASE.set(forwardBase)
     WITH_DEBUG_REGFILE_PORT.set(withDebugRegFilePort)
+    WITH_PERF_COUNTERS.set(withPerfCounters)
     MEMORY_STALL.set(memoryStall)
     MEMORY_LATENCY.set(memoryLatency)
     ICACHE_BYTES.set(icacheBytes)

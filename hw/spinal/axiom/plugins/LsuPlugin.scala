@@ -377,7 +377,11 @@ class LsuPlugin extends AxiomPlugin {
       bus.mask := (laneMask << addressLow).resize(8).asBits
 
       val accepted = bus.enable && bus.ready
-      outstanding := (outstanding || (accepted && !bus.write)) && !bus.rvalid
+      // Acceptance wins over the answer arriving, for the same reason it does
+      // in fetch: a read accepted on the cycle the previous answer comes back
+      // is owed one of its own, and a memory that pipelines can do both at
+      // once.
+      outstanding := (outstanding && !bus.rvalid) || (accepted && !bus.write)
       when(accepted) { issued := True }
       when(node.down.isMoving) { issued := False }
 

@@ -28,12 +28,12 @@ object GenerateAxiomCore extends App {
 }
 
 /** The core as it would go on a chip: no debug read port on the register file,
-  * and the narrow bypass network. Both are measured choices rather than
-  * defaults, which is why they have their own target.
+  * the narrow bypass network, and no cycle accounting. All three are measured
+  * choices rather than defaults, which is why they have their own target.
   */
 object GenerateAxiomCoreLean extends App {
   AxiomSpinalConfig().generateVerilog(
-    new AxiomCore(forwardBase = false, withDebugRegFilePort = false)
+    new AxiomCore(forwardBase = false, withDebugRegFilePort = false, withPerfCounters = false)
       .setDefinitionName("AxiomCoreLean"))
   println("Wrote generated/AxiomCoreLean.v")
 }

@@ -42,19 +42,37 @@ class PerfPlugin extends AxiomPlugin with PerfService {
     // is halted is an artefact of the stages draining, not part of the run.
     val running = !io.halted
 
-    val counters = Vec(Seq.tabulate(PerfEvent.COUNT) { index =>
-      events.get(index) match {
-        case Some(flag) =>
-          val count = Reg(UInt(32 bits)) init 0
-          when(running && flag) { count := count + 1 }
-          count
-        case None => U(0, 32 bits)
-      }
-    })
+    val present = AxiomParam.WITH_PERF_COUNTERS.get
 
-    // Registered, so that the selection multiplexer is not in series with
-    // whatever the test bench does with the value. It costs a cycle of latency
-    // on a signal nothing in the design reads.
-    io.dbgPerfCount := RegNext(counters.read(io.dbgPerfSelect)) init 0
+    val counting = present generate new Area {
+      val counters = Vec(Seq.tabulate(PerfEvent.COUNT) { index =>
+        events.get(index) match {
+          case Some(flag) =>
+            // Sampled, not counted directly.
+            //
+            // The event comes from whatever the plugin that owns it happens to
+            // be computing, and the counter it feeds is somewhere else
+            // entirely; measured on an ECP5, that wire plus the thirty-two bit
+            // carry chain behind it was the critical path of the whole core.
+            // A register in between costs a cycle of reporting delay on a
+            // number nothing in the design reads, and the count is the same.
+            val sampled = RegNext(running && flag) init False
+            val count = Reg(UInt(32 bits)) init 0
+            when(sampled) { count := count + 1 }
+            count
+          case None => U(0, 32 bits)
+        }
+      })
+
+      // Registered for the same reason: the selection multiplexer is not in
+      // series with whatever reads the value.
+      io.dbgPerfCount := RegNext(counters.read(io.dbgPerfSelect)) init 0
+    }
+
+    // A build without the counters answers zero, which is what a counter that
+    // was never built has counted.
+    val silent = (!present) generate new Area {
+      io.dbgPerfCount := U(0, 32 bits)
+    }
   }
 }
