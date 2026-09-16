@@ -580,16 +580,6 @@ defined changes the meaning of a binary that relied on it trapping, so the
 count of reserved opcodes is asserted rather than assumed, and it went from
 twenty-seven to twenty-six here on purpose.
 
-## M7 Divide
-
-Deliberately after M5. A multi-cycle divider needs the stall protocol, and
-adding it before the memory system can stall would mean building that protocol
-twice.
-
-**Exit:** random co-simulation with divide in the instruction mix, including
-division by zero and the signed overflow case, whose results the spec must
-define first.
-
 ## M8 Compute profile and the tile unit
 
 The largest piece, and the one with the most unresolved design.
