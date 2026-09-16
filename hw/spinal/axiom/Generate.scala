@@ -38,6 +38,19 @@ object GenerateAxiomCoreLean extends App {
   println("Wrote generated/AxiomCoreLean.v")
 }
 
+/** The same core with the cycle accounting left out, to price it.
+  *
+  * The counters take an event from a stall signal in nearly every plugin and
+  * run it into a thirty-two bit counter somewhere else, which is a lot of long
+  * wires on a part whose critical paths are already mostly routing. This is the
+  * target that says how much that costs.
+  */
+object GenerateAxiomCoreNoPerf extends App {
+  AxiomSpinalConfig().generateVerilog(
+    new AxiomCore(withPerfCounters = false).setDefinitionName("AxiomCoreNoPerf"))
+  println("Wrote generated/AxiomCoreNoPerf.v")
+}
+
 /** No multiplier and no debug port, to see what the critical path is behind
   * the DSP cascade.
   */

@@ -26,8 +26,8 @@ Two rules hold throughout, and they are what keep the thing honest:
 | M5 Stallable memory | Done |
 | M5b First level caches | Done |
 | M7 Divide | Done |
-| Store buffer | Next |
-| M6 Privilege and traps | Planned |
+| Performance, measured | Done |
+| M6 Privilege and traps | Next |
 | M8 Compute profile and the tile unit | Planned |
 | M9 Superscalar | Planned |
 
@@ -418,20 +418,24 @@ before committing eight kilobytes evenly out of habit.
 
 ### Line size, and a caveat about the model
 
+Measured first against a memory that charged its full latency for every
+doubleword, this table said shorter was always better, by a wide margin: a long
+line was simply more full-price accesses. That was a fact about the model. The
+memory pipelines now, so a refill costs the latency once plus a cycle a word,
+and the same measurement says:
+
 | Line | Tight loop | Sweep |
 | --- | --- | --- |
-| 16 B | 783 | 19,870 |
-| 32 B | 837 | 21,038 |
-| 64 B | 872 | 23,376 |
-| 128 B | 1,016 | 23,342 |
+| 16 B | 643 | 16,435 |
+| 32 B | 649 | 16,544 |
+| 64 B | 644 | 16,792 |
+| 128 B | 660 | 16,448 |
 
-Shorter is better here, and that result should not be believed outside this
-model. The memory behind charges its full latency for every doubleword and
-cannot burst, so a long line is simply more full-price accesses. Real memory
-amortises a burst across a line and the curve turns over the other way. The
-honest statement is that line size is the one parameter here whose measurement
-is an artefact of the memory model, and it should be re-measured against a
-bursting one before anybody picks a number from this table.
+Flat, which is the honest answer for a memory that pipelines but does not burst:
+a longer line costs a little more per miss and takes a few more misses away, and
+the two nearly cancel. A memory that bursts would tip it towards longer lines,
+so this is still the parameter to re-measure against a real one before picking a
+number, but it is no longer measuring the wrong thing.
 
 ### What they cost, and a lesson about believing the first number
 
@@ -581,6 +585,128 @@ That last one is the check earning its keep. A reserved slot quietly becoming
 defined changes the meaning of a binary that relied on it trapping, so the
 count of reserved opcodes is asserted rather than assumed, and it went from
 twenty-seven to twenty-six here on purpose.
+
+## Performance, measured — done
+
+The core computed the right answers at a known number of cycles, and nothing
+said where those cycles went. That is the information needed to decide what to
+optimise, so it was built first and everything after it was chosen by the
+numbers rather than by a prior.
+
+### Cycle accounting
+
+A `PerfService` hands each plugin one counter for the one stall it causes:
+fetch starvation, the register interlock, waiting for load data, waiting for the
+bus to accept a command, the divider, redirects taken, and a refill in each
+cache. They leave through one indexed port rather than one output each, because
+the debug interface is a fixed shape shared by both top levels and a counter per
+event would put the event list into it.
+
+Two rules make the numbers mean something. A counter is claimed with no driver
+and wants exactly one, so a counter claimed and left undriven is an elaboration
+error rather than a zero that reads like a measurement. And a stall is counted
+only on cycles the stage could otherwise have moved, so a cycle lost deeper in
+the pipeline is charged once, to whoever caused it.
+
+The first reading, on a tightly coupled memory, with five workloads shaped
+around different ways of spending cycles:
+
+| Workload | Cycles | Retired | IPC | Fetch | Interlock | Redirect |
+| --- | --- | --- | --- | --- | --- | --- |
+| straight-line | 1,008 | 706 | 0.70 | 1 | 0 | 99 |
+| sum-of-squares | 236 | 168 | 0.71 | 1 | 40 | 21 |
+| memcpy | 774 | 452 | 0.58 | 1 | 128 | 63 |
+| dot-product | 485 | 259 | 0.53 | 1 | 128 | 31 |
+| branchy | 904 | 483 | 0.53 | 1 | 128 | 96 |
+
+The cycles no counter claims are the branch shadow, and there were three per
+redirect: around thirty per cent of a loop of independent adds, which made it
+the largest single cost in the core. The interlock was second. **Stores cost
+nothing**, which killed the store buffer that had been sitting at the top of
+this roadmap as the next thing to build: write-through does cost a memory
+access per store, but nothing in the pipeline was waiting for it.
+
+### Predicting the one branch that matters
+
+Decode already knows the target of a relative branch, and the sign of the
+displacement is a good guess at its direction: backwards is a loop, forwards is
+an error check or an else branch. So decode redirects for a backward conditional
+branch as it already did for an unconditional one, the guess travels with the
+instruction, and execute redirects only when the two disagree — to the target if
+it was taken after all, to the next instruction if it was not.
+
+One wire, no table, no update path, and a taken loop branch costs one
+instruction instead of three.
+
+### Collecting a store's data a stage late
+
+A store's data is the one operand nothing computes with: read in the read stage,
+handed to the bus in the memory stage two stages later. So a store may start
+while the instruction producing its data is still in execute and collect the
+value in memory, where that producer has reached writeback. The interlock lets
+it past for that producer and no other, because one further ahead will have
+committed and gone by then.
+
+It is not a second bypass network. One source, one comparator, one multiplexer,
+because nothing overtakes anything: the only instruction that can be writing a
+register a memory-stage instruction read is the one exactly one stage ahead.
+
+### What it came to, on a tightly coupled memory
+
+| Workload | Before | After | IPC |
+| --- | --- | --- | --- |
+| straight-line | 1,008 | 812 | 0.70 → 0.87 |
+| sum-of-squares | 236 | 236 | 0.71 |
+| memcpy | 774 | 523 | 0.58 → 0.86 |
+| dot-product | 485 | 425 | 0.53 → 0.61 |
+| branchy | 904 | 780 | 0.53 → 0.62 |
+
+Sum-of-squares does not move because its loop already closed with an
+unconditional branch, which decode folded before any of this. Dot-product keeps
+its interlock because that one is a load feeding a multiply and a multiply
+feeding an add, which are real dependencies and not an artefact of when
+operands are read.
+
+### The memory behind the caches now pipelines
+
+A line refill asked for one word, waited the full latency, then asked for the
+next, so a four word line cost four times the latency. That is not what a
+memory with a fixed access time does, and it is what made the line-size
+measurements below wrong. The memory now takes a command every cycle and
+answers in order, and the refill engine asks for the whole line while the first
+answer is still on its way. The address travels down the pipeline rather than
+the data, because an address is twelve bits and a word is sixty-four.
+
+Behind 4 kB caches over a memory of latency eight:
+
+| Workload | Before | After |
+| --- | --- | --- |
+| memcpy | 1,356 | 897 |
+| dot-product | 1,109 | 677 |
+| branchy | 1,447 | 1,015 |
+| sum-of-squares | 348 | 276 |
+| straight-line | 888 | 840 |
+
+### Three bugs that needed a memory able to answer and accept at once
+
+All three were latent and unreachable while the memory refused a command on the
+cycle it answered one.
+
+**Fetch and the load/store unit forgot a command accepted on the cycle an
+answer arrived.** Both cleared their outstanding-response flag on the answer and
+set it on acceptance, in that order, so the acceptance was lost. Two commands
+then went out where one was tracked, the answers stopped lining up with the
+transactions waiting for them, and every instruction after that point was
+decoded against the wrong address. Acceptance has to win over the answer.
+
+**Fetch armed its orphan from that same flag**, which does not read back until
+the cycle after acceptance, so a transaction thrown on the cycle it arrived left
+an answer nobody was going to drop.
+
+**The cache's test bench sampled the command before the clock edge**, which
+reads the previous cycle's value. That was invisible while the cache held a
+command up until it was answered, and hid half a refill's commands the moment it
+stopped.
 
 ## M8 Compute profile and the tile unit
 
