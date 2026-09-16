@@ -23,9 +23,11 @@ Two rules hold throughout, and they are what keep the thing honest:
 | M2 Plugin skeleton | Done |
 | M3 Base profile execution | Done |
 | M4 Verification | Done |
-| M5 Stallable memory | Next |
+| M5 Stallable memory | Done |
+| M5b First level caches | Done |
+| M7 Divide | Done |
+| Store buffer | Next |
 | M6 Privilege and traps | Planned |
-| M7 Divide | Planned |
 | M8 Compute profile and the tile unit | Planned |
 | M9 Superscalar | Planned |
 
