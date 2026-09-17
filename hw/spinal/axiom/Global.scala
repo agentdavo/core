@@ -47,6 +47,18 @@ object Global extends AreaObject {
     */
   val READS_RD = Payload(Bool())
 
+  /** Where the front end went after fetching this instruction.
+    *
+    * The instruction itself is not read until decode, so the address fetched
+    * after it is a guess. Carrying the guess with the instruction is what lets
+    * decode check it: decode knows what the instruction is and where it
+    * actually goes, and a guess that does not match is corrected there. That
+    * check is what makes an untagged prediction table safe — the worst an
+    * entry belonging to some other address can do is cost the cycles of a
+    * redirect.
+    */
+  val PREDICTED_NEXT = Payload(UInt(AxiomParam.PC_WIDTH bits))
+
   /** The `rd` operand is not needed until the memory stage.
     *
     * A store's data is the one operand in the machine that nothing computes

@@ -53,6 +53,18 @@ trait PcService {
   def generationOk(node: NodeApi): Bool
 }
 
+/** The guess about where the instruction at a given address goes next.
+  *
+  * Asked by the program counter, answered by the branch unit. Nothing about
+  * the answer has to be right: the instruction is not even read yet. Decode
+  * checks it against the instruction once it has one, and corrects it there.
+  */
+trait PredictorService {
+
+  /** The address to fetch after `pc`. Only valid to call from a build phase. */
+  def nextPc(pc: UInt): UInt
+}
+
 /** The front end, as the rest of the pipeline needs to see it. */
 trait FetchService {
 

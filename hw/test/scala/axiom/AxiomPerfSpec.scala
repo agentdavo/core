@@ -80,16 +80,17 @@ class AxiomPerfSpec extends AxiomSpec {
     result.cycles - result.retired - stalls
   }
 
-  test("a loop's backward branch costs one instruction, not three") {
+  test("a loop the front end has learnt costs nothing to go round") {
     // A conditional branch resolved in execute throws the three instructions
-    // behind it. Predicted in decode, a taken one throws one. The loop here
-    // closes with a backward conditional branch taken every iteration but the
-    // last, so almost every redirect it makes should cost a single cycle.
+    // behind it; folded in decode it throws one; folded in fetch, from a
+    // branch the front end has seen before, it throws none. The loop here goes
+    // round a hundred times, so all but the first few should be free.
     val result = measure(AxiomWorkloads.straightLine, AxiomSim.soc)
-    val redirects = result.event("redirect")
-    assert(redirects > 50, "the loop should redirect once per iteration")
-    assert(shadow(result) < redirects * 2,
-      s"${shadow(result)} shadow cycles for $redirects redirects: the prediction is not holding")
+    assert(result.event("redirect") < 10,
+      s"${result.event("redirect")} redirects: the front end is not folding the loop")
+    assert(shadow(result) < 30,
+      s"${shadow(result)} shadow cycles in a hundred iterations")
+    assert(result.retired.toDouble / result.cycles > 0.95, s"IPC is ${result.retired.toDouble / result.cycles}")
   }
 
   test("cycle accounting behind caches") {

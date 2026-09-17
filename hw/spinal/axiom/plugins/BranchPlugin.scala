@@ -42,7 +42,15 @@ import spinal.lib.misc.pipeline._
   * them. The program counter plugin is told which stage each one comes from
   * and discards only the instructions younger than it.
   */
-class BranchPlugin extends AxiomPlugin {
+class BranchPlugin extends AxiomPlugin with PredictorService {
+
+  /** The front end's view of the predictor: does the instruction at this
+    * address jump, and where to. A Handle because the program counter asks in
+    * its own build, which may run before this one.
+    */
+  private val frontEnd = spinal.core.fiber.Handle[UInt => UInt]()
+
+  override def nextPc(pc: UInt): UInt = frontEnd.get.apply(pc)
 
   val SEL    = Payload(Bool())
   val RESULT = Payload(Bits(AxiomParam.XLEN bits))
@@ -79,6 +87,37 @@ class BranchPlugin extends AxiomPlugin {
       def indexOf(pc: UInt): UInt = pc(IndexBits + 1 downto 2)
       def predict(pc: UInt): Bool = counters.read(indexOf(pc)).msb
 
+      /** Where the branch at this entry went last time it was folded.
+        *
+        * Untagged, and it does not need a tag: the front end acts on an entry
+        * before it has read the instruction, and decode checks the result
+        * against the instruction it then has. An entry left by a different
+        * address costs a redirect and nothing else.
+        *
+        * Distributed RAM rather than registers, unlike the counters: thirty-two
+        * addresses is two thousand bits, where thirty-two counters is sixty-four.
+        */
+      val targets = Mem(UInt(AxiomParam.PC_WIDTH bits), Entries)
+      val known = Vec.fill(Entries)(Reg(Bool()) init False)
+
+      def jumps(pc: UInt): Bool = known.read(indexOf(pc)) && predict(pc)
+      def target(pc: UInt): UInt = targets.readAsync(indexOf(pc))
+
+      /** Remember a branch decode folded, so the front end can fold it before
+        * decode next time.
+        *
+        * An unconditional branch has its counter driven to the top rather than
+        * nudged: it has no direction to learn and execute never resolves one
+        * for it, so left to the counters it would sit at the cold value and
+        * never be folded early at all. That was worth a cycle per iteration of
+        * every loop that closes with a plain branch.
+        */
+      def remember(pc: UInt, to: UInt, always: Bool): Unit = {
+        targets.write(indexOf(pc), to)
+        known.onSel(indexOf(pc)) { entry => entry := True }
+        when(always) { counters.onSel(indexOf(pc)) { counter => counter := 3 } }
+      }
+
       /** Move one step towards what actually happened, saturating. */
       def record(pc: UInt, taken: Bool): Unit = {
         val index = indexOf(pc)
@@ -88,6 +127,14 @@ class BranchPlugin extends AxiomPlugin {
             .otherwise { when(counter =/= 0) { counter := counter - 1 } }
         }
       }
+    }
+
+    /** What the front end fetches after `pc`, before anything has read the
+      * instruction there. A branch it has folded before jumps; everything else
+      * carries on to the next instruction.
+      */
+    frontEnd.load { (pc: UInt) =>
+      Mux(history.jumps(pc), history.target(pc), pc + 4)
     }
 
     // ---- the unconditional relative branch, folded in decode -------------
@@ -146,19 +193,44 @@ class BranchPlugin extends AxiomPlugin {
         */
       val fired = Reg(Bool()) init False
 
-      // Validity is not enough here. Decode's instruction payload comes
+      /** Where this instruction really goes, as far as decode can tell.
+        *
+        * An indirect jump is the exception: its target is a register and does
+        * not exist yet, so decode calls it not taken and execute corrects it,
+        * which is what it did before any of this.
+        */
+      val folding = node(SEL) && (isRelative || predictTaken)
+      val target = node(Global.PC) + node(Global.BRANCH_OFF)
+      val wanted = Mux(folding, target, node(Global.PC) + 4)
+
+      // Redirect when the front end went somewhere else, rather than whenever
+      // this is a taken branch. The two are the same thing for a branch the
+      // front end has not seen before, and not the same for one it has: that
+      // one was already folded a stage earlier and costs nothing here. It is
+      // also what catches a prediction made from an entry belonging to some
+      // other address, without the table needing a tag to prevent it.
+      //
+      // Validity is not enough on its own. Decode's instruction payload comes
       // straight off the fetch unit's buffer, so a stalled decode with an
       // empty buffer is holding a valid transaction and the previous
       // instruction's bits. Acting on those was worth twenty times the cycles
       // behind a cache: every branch decoded from a stale word threw away the
       // fetch in progress, and the front end never got a line in.
+      val mispredicted = node(Global.PREDICTED_NEXT) =/= wanted
       val redirecting = node.up.isValid && host[FetchService].instructionPresent &&
-        !fired && node(SEL) && (isRelative || predictTaken) &&
-        host[PcService].generationOk(node.up)
+        !fired && mispredicted && host[PcService].generationOk(node.up)
       fired := (fired || redirecting) && node.up.isValid && !node.up.isMoving
 
       earlyRedirect.valid := redirecting
-      earlyRedirect.payload := node(Global.PC) + node(Global.BRANCH_OFF)
+      earlyRedirect.payload := wanted
+
+      // Teach the front end the branches decode has folded. Only the ones it
+      // can fold: an indirect jump has no target to remember, and a branch
+      // predicted not taken is one the front end is already right about.
+      when(node.up.isValid && host[FetchService].instructionPresent && folding &&
+        host[PcService].generationOk(node.up)) {
+        history.remember(node(Global.PC), target, isRelative)
+      }
     }
 
     val node = ctrl(Stages.EXECUTE)

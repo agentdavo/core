@@ -45,12 +45,19 @@ class PcPlugin extends AxiomPlugin with PcService {
     generation.load(gen)
 
     // Fetch always has something to offer: there is always a next address.
+    //
+    // Which address that is comes from the branch unit rather than from a plus
+    // four here. It is a guess made without having read the instruction, and
+    // it travels with the instruction so that decode can check it.
+    val next = host[PredictorService].nextPc(pc)
+
     node.up.valid := True
     node.up(Global.PC) := pc
     node.up(Global.FETCH_GEN) := gen
+    node.up(Global.PREDICTED_NEXT) := next
 
     when(node.up.isFiring) {
-      pc := pc + 4
+      pc := next
     }
 
     // Shallowest first, so a redirect from a deeper stage is assigned last and
