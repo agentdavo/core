@@ -182,7 +182,7 @@ class AluPlugin extends AxiomPlugin {
     host[RegFileService].addResult(SEL_ALU, RESULT)
     host[RegFileService].addResult(SEL_SHIFT, SHIFT_RESULT, availableAt = Stages.MEMORY)
     if (AxiomParam.WITH_MULTIPLIER.get) {
-      host[RegFileService].addResult(SEL_MUL, MUL_RESULT, availableAt = Stages.WRITEBACK)
+      host[RegFileService].addResult(SEL_MUL, MUL_RESULT, availableAt = Stages.MEMORY)
     }
   }
 
