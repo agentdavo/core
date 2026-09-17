@@ -83,7 +83,7 @@ case class CacheUnit(
     val active = Reg(Bool()) init False
     val address = Reg(UInt(addressWidth bits)) init 0
 
-    /** Two pointers, not one.
+    /** Two pointers, not one, and both start at the word that missed.
       *
       * The memory behind takes a command every cycle and answers in order, so
       * the whole line is asked for while the first answer is still on its way.
@@ -91,6 +91,12 @@ case class CacheUnit(
       * line cost four times the memory's latency; with two it costs the
       * latency once. `issue` says how much has been asked for and `word` where
       * the next answer goes.
+      *
+      * Asking for the missing word first and wrapping round the line costs
+      * nothing and means the answer the core is waiting for is the first one
+      * back, rather than the one at the end of the line. The rest of the line
+      * lands behind it while the core gets on with the instruction that was
+      * stalled.
       */
     val issue = Reg(UInt(wordBits bits)) init 0
     val asking = Reg(Bool()) init False
@@ -98,9 +104,16 @@ case class CacheUnit(
     val captured = Reg(Bits(dataWidth bits)) init 0
     val done = Reg(Bool()) init False
 
+    /** Commands still to send, and answers still owed. Counters rather than
+      * comparisons against the end of the line, because the pointers wrap.
+      */
+    val toIssue = Reg(UInt(wordBits + 1 bits)) init 0
+    val toFill = Reg(UInt(wordBits + 1 bits)) init 0
+
     val wanted = wordOf(address)
-    val last = word === (lineWords - 1)
-    val lastIssue = issue === (lineWords - 1)
+    val first = toFill === lineWords
+    val last = toFill === 1
+    val lastIssue = toIssue === 1
   }
 
   // ---- the lookup, one cycle behind the command ---------------------------
@@ -165,8 +178,10 @@ case class CacheUnit(
   when(lookup.miss && !refill.active) {
     refill.active := True
     refill.address := lookup.address
-    refill.word := 0
-    refill.issue := 0
+    refill.word := wordOf(lookup.address)
+    refill.issue := wordOf(lookup.address)
+    refill.toIssue := lineWords
+    refill.toFill := lineWords
     refill.asking := True
     lineValid(lookup.index) := False
   }
@@ -175,8 +190,10 @@ case class CacheUnit(
     arrayWrite.enable := True
     arrayWrite.address := indexOf(refill.address) @@ refill.word
     arrayWrite.value := io.memory.rdata
-    when(refill.word === refill.wanted) { refill.captured := io.memory.rdata }
+    // The first answer is the word that missed, by construction.
+    when(refill.first) { refill.captured := io.memory.rdata }
     refill.word := refill.word + 1
+    refill.toFill := refill.toFill - 1
     when(refill.last) {
       refill.active := False
       tags.write(address = indexOf(refill.address), data = tagOf(refill.address))
@@ -184,9 +201,10 @@ case class CacheUnit(
     }
   }
 
-  // A one-cycle pulse after the last word lands, which is when the line is
-  // whole and the word that was asked for can be handed back.
-  refill.done := refill.active && io.memory.rvalid && refill.last
+  // A one-cycle pulse after the word that missed lands, which is the first
+  // answer back. The rest of the line is still arriving; nothing new is
+  // accepted until it has, but the instruction that missed is already moving.
+  refill.done := refill.active && io.memory.rvalid && refill.first
 
   /** A store that finds its line present updates it, so the next load of that
     * address does not go back to memory for something just written. A store
@@ -236,6 +254,7 @@ case class CacheUnit(
   io.memory.mask := io.core.mask
   when(refill.active && refill.asking && io.memory.ready) {
     refill.issue := refill.issue + 1
+    refill.toIssue := refill.toIssue - 1
     when(refill.lastIssue) { refill.asking := False }
   }
 
