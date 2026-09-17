@@ -12,13 +12,18 @@ import spinal.lib.misc.pipeline._
   * it there costs the three instructions behind it whenever the guess made in
   * decode turns out wrong.
   *
-  * The guess is the direction of the displacement: a conditional branch that
-  * goes backwards is predicted taken, one that goes forwards is predicted not
-  * taken. That is the whole predictor, and it is nearly free, because the
-  * target of a relative branch is known in decode already. It is worth having
-  * because a loop closes with a backward branch taken every iteration but the
-  * last, and the counters said that branch shadow was the largest single cost
-  * in the core: around thirty per cent of a loop of independent adds.
+  * The guess comes from thirty-two two-bit counters indexed by the program
+  * counter, read in decode and moved towards what happened in execute. The
+  * target of a relative branch is known in decode already, so a branch that is
+  * predicted taken redirects from there and costs one instruction rather than
+  * three. The counters said this shadow was the largest single cost in the
+  * core: around thirty per cent of a loop of independent adds.
+  *
+  * The first version of the predictor was the sign of the displacement alone,
+  * backwards taken and forwards not, which is right about loops and wrong
+  * every time about the other common shape: a forward branch that is nearly
+  * always taken, which is what a filter or a bounds check looks like. The
+  * table costs sixty-four registers and gets both.
   *
   * A prediction is not a second answer. Execute still computes the real one
   * and redirects whenever the two disagree, which is what makes a wrong guess
