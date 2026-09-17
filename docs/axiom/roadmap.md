@@ -650,6 +650,31 @@ bits mean one exception does not flip a settled prediction. It is flip-flops
 rather than a memory, because sixty-four registers is cheaper than a
 distributed RAM whose initial value the part does not promise to keep.
 
+### Folding a branch in fetch
+
+Folded in decode, a taken branch costs one instruction rather than three, and
+that one was the largest cost left: a hundred and one redirects and a hundred
+and seven wasted cycles in a hundred-iteration loop, one per time round.
+
+So the front end fetches from a table instead of adding four. Thirty-two
+entries indexed by the program counter hold where the branch there went when
+decode last folded it, read alongside the counter that says whether it goes. A
+branch the table knows costs nothing at all: the instruction fetched after it
+is the one at the target.
+
+**The table has no tag and does not need one.** The front end acts before
+anything has read the instruction, so its answer is a guess in every case, and
+what makes it safe is that the guess travels with the instruction: decode knows
+what the instruction is and where it really goes, and redirects whenever the
+two differ. That covers a prediction made from an entry left by a different
+address, a branch whose direction has changed, and an indirect jump, whose
+target is a register and still resolves in execute. A tag would prevent one of
+those three and cost more than all of them.
+
+An unconditional branch has its counter driven to the top rather than nudged.
+It has no direction to learn and execute never resolves one for it, so left to
+the counters it would sit at the cold value and never be folded in fetch.
+
 ### Redirecting when the branch knows, not when it may leave
 
 A redirect has to happen exactly once per branch, and the obvious way to say
@@ -695,18 +720,18 @@ register a memory-stage instruction read is the one exactly one stage ahead.
 
 | Workload | Before | After | IPC |
 | --- | --- | --- | --- |
-| straight-line | 1,008 | 814 | 0.70 → 0.87 |
-| sum-of-squares | 236 | 236 | 0.71 |
-| memcpy | 774 | 525 | 0.58 → 0.86 |
-| dot-product | 485 | 427 | 0.53 → 0.61 |
-| branchy | 904 | 692 | 0.53 → 0.70 |
-| filter | — | 805 | 0.65 |
+| straight-line | 1,008 | 717 | 0.70 → 0.98 |
+| sum-of-squares | 236 | 217 | 0.71 → 0.77 |
+| memcpy | 774 | 464 | 0.58 → 0.97 |
+| dot-product | 485 | 398 | 0.53 → 0.65 |
+| branchy | 904 | 631 | 0.53 → 0.77 |
+| filter | — | 690 | 0.76 |
 
-Sum-of-squares does not move because its loop already closed with an
-unconditional branch, which decode folded before any of this. Dot-product keeps
-its interlock because that one is a load feeding a multiply and a multiply
-feeding an add, which are real dependencies and not an artefact of when
-operands are read. Filter was written for this work and has no before.
+Two of them now retire an instruction every cycle but three. What is left is
+dependencies rather than the pipeline: dot-product's hundred and twenty-eight
+interlock cycles are a load feeding a multiply and a multiply feeding an add,
+both of them real, and the same load-use pair is what branchy and filter are
+waiting on. Filter was written for this work and has no before.
 
 ### Three things behind the caches
 
@@ -737,11 +762,11 @@ Behind 4 kB caches over a memory of latency eight:
 
 | Workload | Before | After |
 | --- | --- | --- |
-| straight-line | 1,084 | 840 |
-| sum-of-squares | 348 | 269 |
-| memcpy | 1,480 | 769 |
-| dot-product | 1,169 | 661 |
-| branchy | 1,571 | 877 |
+| straight-line | 1,084 | 743 |
+| sum-of-squares | 348 | 250 |
+| memcpy | 1,480 | 708 |
+| dot-product | 1,169 | 632 |
+| branchy | 1,571 | 816 |
 
 **A caveat the counters made visible.** "Stores cost nothing" is true on a
 tightly coupled memory and was not true behind a write-through cache, where
