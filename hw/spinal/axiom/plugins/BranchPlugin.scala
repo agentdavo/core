@@ -5,42 +5,37 @@ import spinal.core._
 import spinal.lib._
 import spinal.lib.misc.pipeline._
 
-/** Branches, jumps and the link they write.
+/** Branches, jumps and the link they write, and the guessing that goes with
+  * them.
   *
-  * A conditional branch resolves in execute, against forwarded operands, so it
-  * may immediately follow the compare that produced its predicate. Resolving
-  * it there costs the three instructions behind it whenever the guess made in
-  * decode turns out wrong.
+  * A branch is resolved in three places, each one cheaper than the last.
   *
-  * The guess comes from thirty-two two-bit counters indexed by the program
-  * counter, read in decode and moved towards what happened in execute. The
-  * target of a relative branch is known in decode already, so a branch that is
-  * predicted taken redirects from there and costs one instruction rather than
-  * three. The counters said this shadow was the largest single cost in the
-  * core: around thirty per cent of a loop of independent adds.
+  * **Fetch** adds four to the program counter unless a table says the
+  * instruction there jumps, in which case it fetches the target instead. The
+  * table is thirty-two entries of a two-bit counter and an address, indexed by
+  * the program counter and filled in by decode. A branch the table knows costs
+  * nothing at all.
   *
-  * The first version of the predictor was the sign of the displacement alone,
-  * backwards taken and forwards not, which is right about loops and wrong
-  * every time about the other common shape: a forward branch that is nearly
-  * always taken, which is what a filter or a bounds check looks like. The
-  * table costs sixty-four registers and gets both.
+  * **Decode** reads the instruction and works out where it really goes: the
+  * target for an unconditional branch, and for a conditional one the same
+  * counter's opinion. If that disagrees with where the front end went, it
+  * redirects, and the instruction behind the branch is the only one lost. It
+  * also teaches the table, so the next time round the front end gets it right.
   *
-  * A prediction is not a second answer. Execute still computes the real one
-  * and redirects whenever the two disagree, which is what makes a wrong guess
-  * cost cycles rather than correctness. What decode predicted travels with the
-  * instruction, so execute compares against what actually happened to that
-  * instruction rather than against whatever the front end is doing now.
+  * **Execute** knows the predicate and the register a jump computes from. It
+  * redirects when what happened disagrees with what decode predicted, which
+  * costs the three instructions behind it, and moves the counter towards what
+  * happened.
   *
-  * An unconditional relative branch does not wait for that. Its target is the
-  * program counter plus a displacement, and both are known in decode, so it
-  * redirects from there and costs one instruction instead of three. That is
-  * worth doing because the pipeline has a decode stage that was otherwise idle
-  * and because calls and returns dominate the taken branches in real code:
-  * this recovers most of what the separate register-read stage cost.
+  * The guessing is safe because each stage checks the one before it. The table
+  * has no tag, an entry left by a different address is a perfectly ordinary
+  * wrong guess, and decode catches it with the instruction in hand: what the
+  * front end did travels with the instruction so that it can be compared
+  * against what the instruction says. Nothing downstream ever acts on a guess
+  * that has not been checked.
   *
-  * The two redirects are exclusive by opcode, so nothing has to reconcile
-  * them. The program counter plugin is told which stage each one comes from
-  * and discards only the instructions younger than it.
+  * The two redirect ports say which stage they come from, and the program
+  * counter plugin discards only the instructions younger than that stage.
   */
 class BranchPlugin extends AxiomPlugin with PredictorService {
 
