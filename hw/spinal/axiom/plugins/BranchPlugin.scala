@@ -58,6 +58,33 @@ class BranchPlugin extends AxiomPlugin {
   }
 
   val logic = during build new Area {
+
+    /** The branch history table.
+      *
+      * Flip-flops and a multiplexer rather than a memory: thirty-two entries
+      * of two bits is sixty-four registers, where a distributed RAM would need
+      * an initial value the ECP5's LUT RAM does not promise to keep and a read
+      * port in the shallowest stage of the pipeline.
+      */
+    val history = new Area {
+      val Entries = 32
+      val IndexBits = log2Up(Entries)
+
+      val counters = Vec.fill(Entries)(Reg(UInt(2 bits)) init 1)
+      def indexOf(pc: UInt): UInt = pc(IndexBits + 1 downto 2)
+      def predict(pc: UInt): Bool = counters.read(indexOf(pc)).msb
+
+      /** Move one step towards what actually happened, saturating. */
+      def record(pc: UInt, taken: Bool): Unit = {
+        val index = indexOf(pc)
+        for (entry <- 0 until Entries) when(index === entry) {
+          val counter = counters(entry)
+          when(taken) { when(counter =/= 3) { counter := counter + 1 } }
+            .otherwise { when(counter =/= 0) { counter := counter - 1 } }
+        }
+      }
+    }
+
     // ---- the unconditional relative branch, folded in decode -------------
     val early = new Area {
       val node = ctrl(Stages.DECODE)
@@ -65,16 +92,21 @@ class BranchPlugin extends AxiomPlugin {
       val isRelative = opcode === B(Isa.B, 6 bits) || opcode === B(Isa.BL, 6 bits)
       val isConditional = opcode === B(Isa.BP, 6 bits)
 
-      /** Backwards is a loop; forwards is an error check or an else branch.
+      /** What this branch did last time, if it has been here before.
         *
-        * The sign of the displacement is the top bit of the sign-extended
-        * offset the decoder already produced, so the prediction costs one wire
-        * and no logic. A table indexed by the program counter would predict
-        * better and would need a memory, a tag, and an update path from
-        * execute; this is the version worth having first, and the counters say
-        * how much of the shadow it removed.
+        * The sign of the displacement is a good first guess — backwards is a
+        * loop, forwards is a check — and it is wrong every time for the other
+        * common shape: a forward branch that is nearly always taken, which is
+        * what a filter, a bounds check or an error path looks like. A workload
+        * built around one spent a quarter of its cycles in the branch shadow.
+        *
+        * Two bits per entry, so a single exception does not flip the
+        * prediction, indexed by the program counter with no tag: two branches
+        * that share an entry confuse each other, which costs cycles and never
+        * correctness. Cold entries read weakly not taken, so a loop is
+        * mispredicted once on the way in rather than once per iteration.
         */
-      val predictTaken = isConditional && node(Global.BRANCH_OFF).msb
+      val predictTaken = isConditional && history.predict(node(Global.PC))
 
       // The guess travels with the instruction. Execute compares against this
       // rather than against the front end's state, which has moved on.
@@ -165,6 +197,17 @@ class BranchPlugin extends AxiomPlugin {
     fired := (fired || redirecting) && node.up.isValid && !node.up.isMoving
 
     redirect.valid := redirecting
+
+    /** Recording is once per branch, on the same terms as redirecting: the
+      * instruction is in execute and has resolved, whether or not the stage is
+      * allowed to move on. Waiting for it to move would put the whole
+      * arbitration network in front of the table's write enable, which is the
+      * path this stopped putting in front of the program counter.
+      */
+    val recorded = Reg(Bool()) init False
+    val recording = node.up.isValid && !recorded && node(SEL) && isConditional
+    recorded := (recorded || recording) && node.up.isValid && !node.up.isMoving
+    when(recording) { history.record(node(Global.PC), taken) }
     redirect.payload := Mux(taken, Mux(isIndirect, indirectTarget, relativeTarget),
       node(Global.PC) + 4)
 

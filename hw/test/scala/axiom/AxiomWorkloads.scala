@@ -166,5 +166,38 @@ object AxiomWorkloads {
     Workload("straight-line", program, Map.empty, 100L * 10)
   }
 
-  val all: Seq[Workload] = Seq(straightLine, sumSquares, memcpy, dotProduct, branchy)
+  /** A forward branch that is nearly always taken.
+    *
+    * Every conditional branch in the other workloads is either a loop closing
+    * backwards or a check that falls through, which is exactly what the
+    * static prediction rule assumes. Real code is full of the other kind: a
+    * bounds check, an error path, a filter that rejects most of what it sees.
+    * The branch here skips its body seven times in eight, and the front end
+    * guesses wrong every one of those times.
+    */
+  val filter: Workload = {
+    val program = Assembler() { a =>
+      import a._
+      li(t0, SrcByte)
+      li(t2, Count)
+      li(a1, 0)
+      label("loop")
+      ldd(t3, t0, 0)
+      andi(t4, t3, 7)       // seven values in eight are not a multiple of eight
+      cmpNei(p0, t4, 0)
+      bp(p0, "skip")        // forward, and taken seven times in eight
+      addi(a1, a1, 1)
+      label("skip")
+      addi(t0, t0, 8)
+      addi(t2, t2, -1)
+      cmpGti(p0, t2, 0)
+      bp(p0, "loop")
+      halt()
+    }
+    val expected = (0 until Count).count(i => values(SrcWord + i) % 8 == 0).toLong
+    Workload("filter", program, values, expected)
+  }
+
+  val all: Seq[Workload] =
+    Seq(straightLine, sumSquares, memcpy, dotProduct, branchy, filter)
 }
