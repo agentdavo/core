@@ -19,13 +19,16 @@ import spinal.lib._
   * with it said longer lines were worse, which was a fact about this model
   * rather than about caches.
   *
-  * A write takes the memory to itself. It is accepted like anything else, held
-  * in a register, and applied once the reads already in flight have been
-  * answered; nothing further is accepted until it has finished. A write that
-  * overtook a read in flight would answer that read with data from after it,
-  * and the point of a memory model is that it is obviously right.
+  * A write is posted: taken in one cycle and applied in the same one, the way
+  * a memory controller with a write queue behaves. The exception is a write to
+  * a word some read already on its way back is going to sample, which would
+  * answer that older read with data from after it; that one is held in a
+  * register until the read has gone, and nothing else is accepted meanwhile.
+  * An earlier version made every write occupy the memory for a full read
+  * latency, and a copy loop spent a tenth of its cycles waiting for the bus to
+  * take a store it had no reason to wait for.
   *
-  * Holding the write rather than refusing it is not a detail. Whether a
+  * Holding the rare write rather than refusing it is not a detail. Whether a
   * command is accepted must not depend on what the command is: the cache asks
   * to write only while the memory says it may, so a ready that looked at the
   * write bit closed a combinational loop through both.
@@ -89,8 +92,8 @@ case class BackingRam(
     val pending = Vec.fill(latency)(Reg(UInt(wordAddressBits bits)) init 0)
     val anyInFlight = inFlight.reduce(_ || _)
 
-    /** The write waiting for the reads in front of it, and then for the
-      * latency a write costs.
+    /** A write that cannot be applied yet, because a read already on its way
+      * back reads the same word and must not see it.
       */
     val held = new Area {
       val valid = Reg(Bool()) init False
@@ -98,13 +101,14 @@ case class BackingRam(
       val value = Reg(Bits(dataWidth bits)) init 0
       val mask = Reg(Bits(dataWidth / 8 bits)) init 0
     }
-    val writeLeft = Reg(UInt(log2Up(latency + 1) bits)) init 0
-    val writeBusy = held.valid || writeLeft =/= 0
-    when(writeLeft =/= 0) { writeLeft := writeLeft - 1 }
 
     // The debug access takes the array over while it is enabled, which is only
     // meant to happen with the core in reset or halted.
-    val blocked = writeBusy || debugActive
+    //
+    // Whether a command is accepted must not depend on what the command is:
+    // the cache asks to write only while the memory says it may, so a ready
+    // that looked at the write bit closed a combinational loop through both.
+    val blocked = held.valid || debugActive
     val accepted = bus.enable && !blocked
     bus.ready := !blocked
 
@@ -112,19 +116,35 @@ case class BackingRam(
     val reads = accepted && !bus.write
     val index_ = wordIndex(bus.address)
 
-    when(writing) {
+    /** Is a read already on its way back reading the word being written?
+      *
+      * Reads sample the array one cycle before their answer is due, so a write
+      * applied now would be seen by a read the core issued before it. That is
+      * only wrong when the two are the same word, and in a program that is
+      * rare: a copy loop reads one array and writes another and never has to
+      * wait at all. So the write goes in at once and the comparison, not a
+      * counter, decides when it may not.
+      */
+    def readsSameWord(address: UInt): Bool =
+      inFlight.zip(pending).map { case (valid, at) => valid && at === address }
+        .reduceOption(_ || _).getOrElse(False)
+
+    val conflict = readsSameWord(index_)
+    when(writing && conflict) {
       held.valid := True
       held.address := index_
       held.value := bus.wdata
       held.mask := bus.mask
     }
 
-    /** Applied once nothing older is still on its way back. */
-    val applying = held.valid && !anyInFlight
-    when(applying) {
-      held.valid := False
-      writeLeft := latency
-    }
+    /** Held writes go in as soon as the read they clashed with has gone. */
+    val releasing = held.valid && !readsSameWord(held.address)
+    when(releasing) { held.valid := False }
+
+    val applying = (writing && !conflict) || releasing
+    val applyAddress = Mux(held.valid, held.address, index_)
+    val applyValue = Mux(held.valid, held.value, bus.wdata)
+    val applyMask = Mux(held.valid, held.mask, bus.mask)
 
     for (slot <- 0 until latency - 1) {
       inFlight(slot) := inFlight(slot + 1)
@@ -166,9 +186,9 @@ case class BackingRam(
     mask := B(dataWidth / 8 bits, default -> True)
     for (c <- channel) {
       when(c.applying) {
-        address := c.held.address
-        value := c.held.value
-        mask := c.held.mask
+        address := c.applyAddress
+        value := c.applyValue
+        mask := c.applyMask
       }
     }
 
