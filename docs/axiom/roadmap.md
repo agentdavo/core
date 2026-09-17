@@ -775,6 +775,29 @@ latency for each one. The store buffer this roadmap used to list as the next
 thing to build is still not the answer — the memory was — but the reason it
 looked unnecessary was narrower than the first reading suggested.
 
+### What is left, by the numbers
+
+The counters say where the remaining cycles are, and they are no longer in the
+pipeline's own behaviour:
+
+- **The load-use interlock**, a hundred and twenty-eight cycles of a four
+  hundred cycle dot product. A load's data arrives in writeback because its
+  command is issued in memory, so an instruction reading it one behind waits
+  two cycles. Issuing the command from execute would make it one, at the price
+  of putting the address adder in front of the memory and moving the atomic and
+  pair sequencing a stage earlier. That is a load/store unit rewrite and it
+  should be measured against the frequency it costs before anybody believes in
+  it.
+- **Cache misses**, which dominate everything behind a cache and are what
+  associativity, a second level, or prefetching would address.
+- **The multiply result**, available in writeback because the adder tree that
+  finishes it sits in memory. Forwarding it a stage earlier would put that tree
+  in front of the forwarding multiplexer, which is what splitting the
+  multiplier was for.
+
+Nothing on that list is a point fix, and none of them is worth doing without a
+frequency measurement beside the cycle count.
+
 ### What it cost on the part
 
 Four seeds each at a 200 MHz target on an LFE5U-45F, out of context, the core
