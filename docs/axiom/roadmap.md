@@ -723,7 +723,7 @@ register a memory-stage instruction read is the one exactly one stage ahead.
 | straight-line | 1,008 | 717 | 0.70 → 0.98 |
 | sum-of-squares | 236 | 217 | 0.71 → 0.77 |
 | memcpy | 774 | 464 | 0.58 → 0.97 |
-| dot-product | 485 | 398 | 0.53 → 0.65 |
+| dot-product | 485 | 366 | 0.53 → 0.71 |
 | branchy | 904 | 631 | 0.53 → 0.77 |
 | filter | — | 690 | 0.76 |
 
@@ -765,7 +765,7 @@ Behind 4 kB caches over a memory of latency eight:
 | straight-line | 1,084 | 743 |
 | sum-of-squares | 348 | 250 |
 | memcpy | 1,480 | 708 |
-| dot-product | 1,169 | 632 |
+| dot-product | 1,169 | 600 |
 | branchy | 1,571 | 816 |
 
 **A caveat the counters made visible.** "Stores cost nothing" is true on a
@@ -777,8 +777,8 @@ looked unnecessary was narrower than the first reading suggested.
 
 ### What is left, by the numbers
 
-The counters say where the remaining cycles are, and they are no longer in the
-pipeline's own behaviour:
+The counters say where the remaining cycles are, and they are mostly no longer
+in the pipeline's own behaviour:
 
 - **The load-use interlock**, a hundred and twenty-eight cycles of a four
   hundred cycle dot product. A load's data arrives in writeback because its
@@ -790,13 +790,17 @@ pipeline's own behaviour:
   it.
 - **Cache misses**, which dominate everything behind a cache and are what
   associativity, a second level, or prefetching would address.
-- **The multiply result**, available in writeback because the adder tree that
-  finishes it sits in memory. Forwarding it a stage earlier would put that tree
-  in front of the forwarding multiplexer, which is what splitting the
-  multiplier was for.
+- **The multiply result** was the third, and turned out to be free: the adder
+  tree that finishes it sits in the memory stage, so the value exists there and
+  was simply being offered a stage later than it existed. Offering it from
+  memory took a dot product's interlock from a hundred and twenty-eight cycles
+  to ninety-six. The worry was that the tree would end up in front of the
+  forwarding multiplexer, which is what splitting the multiplier across two
+  stages was meant to avoid; it has to fit inside a cycle either way, and the
+  multiplexer on top of it did not show up in the critical path.
 
-Nothing on that list is a point fix, and none of them is worth doing without a
-frequency measurement beside the cycle count.
+Neither of the two that are left is a point fix, and neither is worth doing
+without a frequency measurement beside the cycle count.
 
 ### What it cost on the part
 
