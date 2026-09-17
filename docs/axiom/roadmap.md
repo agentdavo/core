@@ -622,21 +622,61 @@ around different ways of spending cycles:
 The cycles no counter claims are the branch shadow, and there were three per
 redirect: around thirty per cent of a loop of independent adds, which made it
 the largest single cost in the core. The interlock was second. **Stores cost
-nothing**, which killed the store buffer that had been sitting at the top of
-this roadmap as the next thing to build: write-through does cost a memory
-access per store, but nothing in the pipeline was waiting for it.
+nothing here**, which took the store buffer off the top of this roadmap:
+write-through does cost a memory access per store, but on this memory nothing
+in the pipeline was waiting for it. Behind a cache they did cost something, and
+the section on the caches below says what that turned out to be.
 
-### Predicting the one branch that matters
+### Predicting branches, in two steps
 
 Decode already knows the target of a relative branch, and the sign of the
-displacement is a good guess at its direction: backwards is a loop, forwards is
-an error check or an else branch. So decode redirects for a backward conditional
-branch as it already did for an unconditional one, the guess travels with the
-instruction, and execute redirects only when the two disagree — to the target if
-it was taken after all, to the next instruction if it was not.
+displacement is a good first guess at its direction: backwards is a loop,
+forwards is an error check or an else branch. So decode redirects for a
+backward conditional branch as it already did for an unconditional one, the
+guess travels with the instruction, and execute redirects only when the two
+disagree — to the target if it was taken after all, to the next instruction if
+it was not. One wire, no table, and a taken loop branch costs one instruction
+instead of three.
 
-One wire, no table, no update path, and a taken loop branch costs one
-instruction instead of three.
+That rule is wrong every time for the other common shape: a forward branch that
+is nearly always taken, which is what a filter, a bounds check or an error path
+looks like. A workload built around one spent a quarter of its cycles in the
+branch shadow, so the guess comes from **thirty-two two-bit counters indexed by
+the program counter**, read in decode and moved one step towards what happened
+in execute. No tag: two branches sharing an entry confuse each other, which
+costs cycles and never correctness. Cold entries read weakly not taken, so a
+loop is mispredicted once on the way in rather than once per iteration, and two
+bits mean one exception does not flip a settled prediction. It is flip-flops
+rather than a memory, because sixty-four registers is cheaper than a
+distributed RAM whose initial value the part does not promise to keep.
+
+### Redirecting when the branch knows, not when it may leave
+
+A redirect has to happen exactly once per branch, and the obvious way to say
+"once" was to fire on the cycle the branch left its stage. Leaving is the wrong
+event to wait for: whether a stage may move is the whole arbitration network,
+every halt in every stage below it, and the measured critical path of the core
+was a stall in the load/store unit travelling back through that network into
+the program counter. A register saying this branch has already redirected says
+"once" without asking about readiness, and the front end starts fetching the
+target while the stall that was holding the branch is still being served.
+
+Three things had to be right, and each broke something first:
+
+- **Decode has to know its instruction arrived.** Its instruction payload is
+  wired straight to the fetch unit's response buffer, so a stalled decode with
+  an empty buffer holds a valid transaction and the previous instruction's
+  bits. Folding a branch out of those threw away the fetch in progress every
+  time; behind a cache the front end never got a line in, at twenty times the
+  cycles.
+- **The instruction that asks for a redirect is not part of the shadow it
+  creates.** From the next cycle its own fetch generation is one behind and the
+  compare that kills the shadow would kill it too, taking a link register write
+  with it.
+- **A bubble never leaves.** Clearing the already-redirected flag only on
+  departure leaves it set while the stage holds nothing, and the next real
+  branch to arrive had its redirect swallowed. That one was caught by the
+  random program cosimulation, on two conditional branches four bytes apart.
 
 ### Collecting a store's data a stage late
 
@@ -655,37 +695,60 @@ register a memory-stage instruction read is the one exactly one stage ahead.
 
 | Workload | Before | After | IPC |
 | --- | --- | --- | --- |
-| straight-line | 1,008 | 812 | 0.70 → 0.87 |
+| straight-line | 1,008 | 814 | 0.70 → 0.87 |
 | sum-of-squares | 236 | 236 | 0.71 |
-| memcpy | 774 | 523 | 0.58 → 0.86 |
-| dot-product | 485 | 425 | 0.53 → 0.61 |
-| branchy | 904 | 780 | 0.53 → 0.62 |
+| memcpy | 774 | 525 | 0.58 → 0.86 |
+| dot-product | 485 | 427 | 0.53 → 0.61 |
+| branchy | 904 | 692 | 0.53 → 0.70 |
+| filter | — | 805 | 0.65 |
 
 Sum-of-squares does not move because its loop already closed with an
 unconditional branch, which decode folded before any of this. Dot-product keeps
 its interlock because that one is a load feeding a multiply and a multiply
 feeding an add, which are real dependencies and not an artefact of when
-operands are read.
+operands are read. Filter was written for this work and has no before.
 
-### The memory behind the caches now pipelines
+### Three things behind the caches
 
-A line refill asked for one word, waited the full latency, then asked for the
-next, so a four word line cost four times the latency. That is not what a
-memory with a fixed access time does, and it is what made the line-size
-measurements below wrong. The memory now takes a command every cycle and
-answers in order, and the refill engine asks for the whole line while the first
-answer is still on its way. The address travels down the pipeline rather than
-the data, because an address is twelve bits and a word is sixty-four.
+**The memory pipelines.** A line refill asked for one word, waited the full
+latency, then asked for the next, so a four word line cost four times the
+latency. That is not what a memory with a fixed access time does, and it is
+what made the line-size measurements above wrong. It now takes a command every
+cycle and answers in order, and the refill engine asks for the whole line while
+the first answer is still on its way. The address travels down the pipeline
+rather than the data, because an address is twelve bits and a word is
+sixty-four.
+
+**Writes are posted.** A write used to hold the memory for a full read latency
+and refuse everything meanwhile, so a copy loop spent a hundred and ten of its
+nine hundred cycles waiting for the bus to take a store. Nothing about a store
+needs that: a controller with a write queue takes a posted write in a cycle. The
+one write that cannot go straight in is one to a word some read already on its
+way back is about to sample, and a comparison against the addresses in flight
+catches exactly that case, so a loop that reads one array and writes another
+never waits.
+
+**The word that missed is asked for first.** Both refill pointers start at the
+missing word and wrap round the line, so the answer the core is waiting for is
+the first one back rather than the one at the end of the line. The rest arrives
+behind it.
 
 Behind 4 kB caches over a memory of latency eight:
 
 | Workload | Before | After |
 | --- | --- | --- |
-| memcpy | 1,356 | 897 |
-| dot-product | 1,109 | 677 |
-| branchy | 1,447 | 1,015 |
-| sum-of-squares | 348 | 276 |
-| straight-line | 888 | 840 |
+| straight-line | 1,084 | 840 |
+| sum-of-squares | 348 | 269 |
+| memcpy | 1,480 | 769 |
+| dot-product | 1,169 | 661 |
+| branchy | 1,571 | 877 |
+
+**A caveat the counters made visible.** "Stores cost nothing" is true on a
+tightly coupled memory and was not true behind a write-through cache, where
+they cost a tenth of a copy loop until the memory model stopped charging a full
+latency for each one. The store buffer this roadmap used to list as the next
+thing to build is still not the answer — the memory was — but the reason it
+looked unnecessary was narrower than the first reading suggested.
 
 ### What it cost on the part
 
