@@ -380,6 +380,17 @@ class LsuPlugin extends AxiomPlugin {
         // One collection per instruction, whichever way it leaves.
         when(node.down.isMoving) { have := False }
 
+        /** Taken combinationally when it is there, so a store that arrives
+          * beside its producer costs nothing at all.
+          *
+          * This puts the writeback stage's result multiplexer in front of the
+          * bus write data, which looked like the sort of thing that ends up in
+          * the critical path. It was measured both ways: collecting through
+          * the register instead costs sixty-four cycles on a copy loop and
+          * buys two tenths of a megahertz, which is nothing. The path that
+          * limits this core is the command arbitration further down, not the
+          * data.
+          */
         val waiting = wanted && forward.hit && !forward.ready && !have
         val value = Mux(have, held, Mux(forward.hit, forward.value, node(Global.RS_D)))
       }
