@@ -85,6 +85,27 @@ class PcPlugin extends AxiomPlugin with PcService {
     }
 
     val decodeNode = ctrl(Stages.DECODE)
-    decodeNode.throwWhen(decodeNode.up(Global.FETCH_GEN) =/= gen)
+
+    /** The instruction that asked for a redirect is not part of the shadow it
+      * created.
+      *
+      * A branch folded in decode redirects as soon as it knows where it is
+      * going, which may be several cycles before it is allowed to leave the
+      * stage. From the next cycle its own fetch generation is one behind, and
+      * the compare below would throw it: the branch would vanish, taking a
+      * link register write with it, and the retired instruction stream would
+      * be missing the instruction that caused the jump.
+      *
+      * So a redirect from decode exempts whatever is in decode until it
+      * leaves, whichever way it leaves. Nothing else is exempted: the
+      * instruction that arrives after it was fetched before the redirect and
+      * is exactly what the compare is for.
+      */
+    val exempt = Reg(Bool()) init False
+    val fromDecode = ordered.filter(_.from == Stages.DECODE).map(_.port.valid)
+    if (fromDecode.nonEmpty) when(fromDecode.reduce(_ || _)) { exempt := True }
+    when(decodeNode.up.isMoving) { exempt := False }
+
+    decodeNode.throwWhen(decodeNode.up(Global.FETCH_GEN) =/= gen && !exempt)
   }
 }

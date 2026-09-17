@@ -28,7 +28,11 @@ import spinal.lib.misc.pipeline._
   * is still owed, nor while the buffer holds a word decode has not taken, so
   * the buffer cannot be overwritten and needs no depth.
   */
-class FetchPlugin extends AxiomPlugin {
+class FetchPlugin extends AxiomPlugin with FetchService {
+
+  private val present = spinal.core.fiber.Handle[Bool]()
+
+  override def instructionPresent: Bool = present.get
 
   private var bus: IBus = null
   private var perfFetch: Bool = null
@@ -117,6 +121,7 @@ class FetchPlugin extends AxiomPlugin {
 
     decodeNode.up(Global.INSTRUCTION) := buffer.word
     decodeNode.haltWhen(!buffer.present)
+    present.load(buffer.present)
 
     // Counted only when decode could otherwise have moved, so that a cycle
     // lost to something deeper in the pipeline is charged to that instead of

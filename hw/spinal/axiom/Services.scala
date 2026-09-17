@@ -53,6 +53,23 @@ trait PcService {
   def generationOk(node: NodeApi): Bool
 }
 
+/** The front end, as the rest of the pipeline needs to see it. */
+trait FetchService {
+
+  /** Is decode looking at a real instruction this cycle?
+    *
+    * Decode's instruction payload is wired straight to the fetch unit's
+    * response buffer, so while the buffer is empty that payload is whatever
+    * was last in it. The stage is halted then, which is enough for anything
+    * that only acts when the stage moves, and not enough for anything that
+    * acts while it waits: decode folds branches, and a branch folded from a
+    * stale word sends the front end somewhere the program never mentioned.
+    *
+    * A Handle because the branch unit asks for it in its own build.
+    */
+  def instructionPresent: Bool
+}
+
 /** The general register file.
   *
   * Results are registered rather than written directly, so that the plugin

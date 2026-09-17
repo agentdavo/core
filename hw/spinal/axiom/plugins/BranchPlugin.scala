@@ -80,24 +80,47 @@ class BranchPlugin extends AxiomPlugin {
       // rather than against the front end's state, which has moved on.
       node(PREDICTED) := node(SEL) && predictTaken
 
-      // The upstream side, plus the generation compare on its own, rather
-      // than the downstream side.
+      // Once per branch, and not on the cycle it happens to leave.
       //
-      // Firing matters: a branch held in decode must redirect on the cycle it
-      // leaves, not on every cycle it waits, or it would bump the fetch
-      // generation repeatedly and discard its own target fetch. Backpressure
-      // is what decides that, and the upstream side carries it.
+      // A redirect must happen exactly once for a given branch, or the fetch
+      // generation moves twice and the second move discards the target fetch
+      // the first one asked for. The obvious way to say "once" is to fire on
+      // the cycle the branch leaves the stage, and that is what this did.
       //
-      // What the downstream side adds is every reason the stage might be
-      // cancelled, and that is what made this the critical path: it chained
-      // the trap decode, the execute redirect and the whole arbitration
-      // network into the fetch generation register. Of those reasons only a
-      // stale generation changes the answer, so it is asked for directly. A
-      // branch cancelled for any other reason may still redirect: an execute
-      // redirect is the one that cancels it, it is applied after this one and
-      // so wins the program counter, and the generation moves once either way.
-      earlyRedirect.valid := node.up.isFiring && node(SEL) && (isRelative || predictTaken) &&
+      // Leaving is the wrong event to wait for. Whether a stage may move is
+      // the whole arbitration network: every halt in every stage below,
+      // including a load/store unit waiting on memory. Measured on an ECP5
+      // that chain, from a stall in the memory stage back through the ready
+      // network and into the program counter, was the critical path of the
+      // core in every seed. And waiting on it is not only slow to elaborate:
+      // it delays the target fetch until the stall clears, when the front end
+      // could have been fetching it all along.
+      //
+      // A register saying this branch has already redirected says "once"
+      // without asking anything about readiness. Validity and the generation
+      // compare are all that is left, and both are close by.
+      /** This transaction has redirected already.
+        *
+        * Held while the same transaction is still in the stage and dropped the
+        * moment it leaves or the stage empties. Clearing it only on departure
+        * is not enough: a stage left holding a bubble never departs, so the
+        * flag would still be set when the next real instruction arrived and
+        * that one's redirect would be swallowed.
+        */
+      val fired = Reg(Bool()) init False
+
+      // Validity is not enough here. Decode's instruction payload comes
+      // straight off the fetch unit's buffer, so a stalled decode with an
+      // empty buffer is holding a valid transaction and the previous
+      // instruction's bits. Acting on those was worth twenty times the cycles
+      // behind a cache: every branch decoded from a stale word threw away the
+      // fetch in progress, and the front end never got a line in.
+      val redirecting = node.up.isValid && host[FetchService].instructionPresent &&
+        !fired && node(SEL) && (isRelative || predictTaken) &&
         host[PcService].generationOk(node.up)
+      fired := (fired || redirecting) && node.up.isValid && !node.up.isMoving
+
+      earlyRedirect.valid := redirecting
       earlyRedirect.payload := node(Global.PC) + node(Global.BRANCH_OFF)
     }
 
@@ -130,19 +153,22 @@ class BranchPlugin extends AxiomPlugin {
     val computed = node(Global.RS_N).asUInt + node(Global.IMM).asUInt
     val indirectTarget = computed(AxiomParam.PC_WIDTH.get - 1 downto 2) @@ U"00"
 
-    // The upstream side again, and for the same reason. The downstream side
-    // here carried the trap decode: a trap thrown in this stage clears it, so
-    // reading it put seven nanoseconds of cause decoding in front of the
-    // redirect. No branch raises a trap, so that term could never change the
-    // answer; it only had to be computed.
+    // Once per branch, as in decode, and for the same two reasons: the ready
+    // network is long, and a branch that knows where it is going has no reason
+    // to keep it to itself while the memory stage finishes something.
     //
-    // Backpressure is still respected, because a branch held by a stalled
-    // memory stage does not fire upstream either, and would otherwise bump the
-    // fetch generation on every cycle it waits.
-    redirect.valid := node.up.isFiring && node(SEL) && wrong
+    // The generation is not asked about here. A younger branch in decode can
+    // move it while this one waits, and this one still has to be obeyed: it is
+    // the older instruction, and its redirect is applied after and wins.
+    val fired = Reg(Bool()) init False
+    val redirecting = node.up.isValid && !fired && node(SEL) && wrong
+    fired := (fired || redirecting) && node.up.isValid && !node.up.isMoving
+
+    redirect.valid := redirecting
     redirect.payload := Mux(taken, Mux(isIndirect, indirectTarget, relativeTarget),
       node(Global.PC) + 4)
 
     node(RESULT) := (node(Global.PC) + 4).asBits
+
   }
 }
