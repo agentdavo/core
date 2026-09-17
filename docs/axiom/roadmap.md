@@ -794,14 +794,18 @@ in the pipeline's own behaviour:
   tree that finishes it sits in the memory stage, so the value exists there and
   was simply being offered a stage later than it existed. Offering it from
   memory took a dot product's interlock from a hundred and twenty-eight cycles
-  to ninety-six. The worry is that the tree ends up in front of the forwarding
-  multiplexer, which is what splitting the multiplier across two stages was
-  meant to avoid. It has to fit inside a cycle either way; what the multiplexer
-  adds on top of it is measured in the table below, and if the multiplier ever
-  turns up in the critical path this is the first thing to take back out.
+  to ninety-six. The worry was that the tree would end up in front of the
+  forwarding multiplexer, which is what splitting the multiplier across two
+  stages was meant to avoid; it has to fit inside a cycle either way, and when
+  it was measured the multiplier did not appear in the critical path at all.
 
 Neither of the two that are left is a point fix, and neither is worth doing
-without a frequency measurement beside the cycle count.
+without a frequency measurement beside the cycle count. The third item on the
+list is the one the frequency table below points at: the load/store unit's
+command arbitration is the critical path, it was the critical path before this
+work started, and it is eighty per cent routing, which means it wants less
+logic spread over less of the part rather than a shallower expression of the
+same thing.
 
 ### What it cost on the part
 
@@ -809,16 +813,34 @@ Four seeds each at a 200 MHz target on an LFE5U-45F, out of context, the core
 with its buses brought out. The baseline is the same core at the commit this
 work started from, generated and placed the same way, because the 58.7 MHz in
 the frequency section above belongs to a core with no caches and no divider and
-is not the thing to compare against.
+is not the thing to compare against. Placement is deterministic per seed, so
+these are the same four experiments run twice.
 
 | | fmax, 4 seeds | range | LUT4 | Flip-flops |
 | --- | --- | --- | --- | --- |
 | before | 44.1 | 40.6 to 45.4 | 10,740 | 3,347 |
-| after | 49.0 | 46.4 to 53.9 | 11,870 | 3,647 |
-| after, counters left out | 48.6 | 47.5 to 49.3 | 11,360 | 3,417 |
+| after | 39.6 | 36.0 to 42.3 | 11,392 | 3,816 |
 
-Ten per cent more logic and, if anything, slightly more clock. Taken with the
-cycle counts, memcpy does the same work in about 1.6 times fewer seconds.
+**Six per cent more logic, fourteen per cent more registers, and ten per cent
+less clock.** On a design whose critical paths are eighty per cent routing,
+area is frequency: there is no single change to blame and the critical path is
+the same one it was before any of this, the load/store unit's command
+arbitration reaching the program counter.
+
+What matters is the product. Cycles times the clock they run at, for the same
+work:
+
+| Workload | Before | After | Faster by |
+| --- | --- | --- | --- |
+| straight-line | 22.9 µs | 18.1 µs | 1.26× |
+| sum-of-squares | 5.35 µs | 5.48 µs | 0.98× |
+| memcpy | 17.6 µs | 11.7 µs | 1.50× |
+| dot-product | 11.0 µs | 9.24 µs | 1.19× |
+| branchy | 20.5 µs | 15.9 µs | 1.29× |
+
+Sum-of-squares is the honest one: nothing here touched the load-use interlock
+it spends its time in, so it pays the lower clock and gets nothing back. It is
+also the workload that says what to do next.
 
 **The counters are free in time and cost about five hundred LUT4.** They were
 not free when first built: the critical path went from a stall signal in one
@@ -829,12 +851,13 @@ somewhere else should register it before doing anything with it — and the
 parameter to leave them out stays, because five hundred LUT4 is real on a small
 part.
 
-**The critical path is now the load/store unit reaching the program counter**,
-four nanoseconds of logic and seventeen of routing, in every seed of every
-variant. That is the arbitration chain: a stall in the memory stage propagating
-back through the pipeline's ready network into the branch redirect. It is the
-next thing to restructure, and being eighty per cent routing it wants a
-structural change rather than a shallower expression.
+**Two things were measured and not kept.** Collecting the store's data through
+its holding register rather than combinationally, to keep the writeback result
+multiplexer out of the bus write data: two tenths of a megahertz for
+sixty-four cycles on a copy loop, so the combinational version stays. And
+forwarding the multiply result from memory, which was expected to put the
+multiplier's adder tree in front of the forwarding network and did not appear
+in the critical path at all, so that one stayed in.
 
 ### Three bugs that needed a memory able to answer and accept at once
 
