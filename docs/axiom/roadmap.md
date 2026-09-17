@@ -794,10 +794,11 @@ in the pipeline's own behaviour:
   tree that finishes it sits in the memory stage, so the value exists there and
   was simply being offered a stage later than it existed. Offering it from
   memory took a dot product's interlock from a hundred and twenty-eight cycles
-  to ninety-six. The worry was that the tree would end up in front of the
-  forwarding multiplexer, which is what splitting the multiplier across two
-  stages was meant to avoid; it has to fit inside a cycle either way, and the
-  multiplexer on top of it did not show up in the critical path.
+  to ninety-six. The worry is that the tree ends up in front of the forwarding
+  multiplexer, which is what splitting the multiplier across two stages was
+  meant to avoid. It has to fit inside a cycle either way; what the multiplexer
+  adds on top of it is measured in the table below, and if the multiplier ever
+  turns up in the critical path this is the first thing to take back out.
 
 Neither of the two that are left is a point fix, and neither is worth doing
 without a frequency measurement beside the cycle count.
