@@ -372,6 +372,33 @@ class AxiomHazardSpec extends AxiomSpec {
     assert(r.word(DataWord + 1) == 0, "the second shadow store must not commit")
   }
 
+  test("nothing in the shadow of a predicted-taken branch commits") {
+    // The other shadow. A branch the front end guessed right about never
+    // redirects from execute at all: the instructions behind it were thrown
+    // when decode folded it, and what killed them is the fetch generation
+    // rather than an explicit throw. The loop below trains the prediction on
+    // its first pass and closes on it three more times, and the store on the
+    // fall-through path must run once, at the end, however confident the front
+    // end became about the branch.
+    val r = cosim(
+      data = Map(DataWord -> 0L),
+      readRange = DataWord until (DataWord + 1)
+    ) { a =>
+      import a._
+      li(s0, DataByte)
+      li(t0, 4)
+      li(t1, 0)
+      label("loop")
+      addi(t1, t1, 7)
+      addi(t0, t0, -1)
+      cmpGti(p0, t0, 0)
+      bp(p0, "loop")
+      std(t1, s0, 0)
+      halt()
+    }
+    assert(r.word(DataWord) == 28, "the fall-through store runs once, after the loop")
+  }
+
   test("nothing in the shadow of a jump or a call commits") {
     val r = cosim() { a =>
       import a._
