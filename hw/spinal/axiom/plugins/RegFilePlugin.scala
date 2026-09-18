@@ -97,8 +97,9 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       * standard answer is a live value table: one bank per write port, each
       * replicated per read port, plus one bit per register saying which bank
       * last wrote it. Every array stays single-write, so every array maps to
-      * distributed RAM, and the live value table is one bit wide and therefore
-      * cheap to keep in flip-flops.
+      * distributed RAM, and the live value table is one bit wide, so it lives
+      * in the same kind of memory rather than in flip-flops with a
+      * multiplexer to index it.
       */
     val storage = new Area {
       val withDebug = AxiomParam.WITH_DEBUG_REGFILE_PORT.get
@@ -124,16 +125,55 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
         bank
       }
 
-      /** Which bank holds the current value of each register. */
-      val live = Vec.fill(count)(Reg(Bool()) init False)
+      /** Which bank holds the current value of each register.
+        *
+        * One bit per register, and the reason it used to be flip-flops is that
+        * it has two writers: a destination write and a base write can land in
+        * the same cycle, and a distributed RAM has one write port. Indexing a
+        * vector of thirty-two registers is a thirty-two to one multiplexer,
+        * four levels of LUT with a wire between each, and it sat in front of
+        * the bank multiplexer on the longest path in the core.
+        *
+        * So the table is two tables, each with one writer, and the bank is the
+        * exclusive or of the two. Writing through port zero makes them equal;
+        * writing through port one makes them differ. Both are memories, so a
+        * read is two cells and an exclusive or rather than four levels of
+        * multiplexer, and yosys has a mapping for it.
+        *
+        * Each table is copied per read port, as the banks are, plus one copy
+        * for the other port's write logic to read.
+        */
+      val liveCopies = readPorts + 1
+      val LiveWriteCopy = readPorts
+
+      val live = Array.tabulate(2, liveCopies) { (write, copy) =>
+        // Four bits wide because that is the narrowest the part's LUT RAM
+        // comes in; only the bottom bit is read. Initialised like the banks it
+        // selects between, so that a register never written reads as zero in
+        // simulation rather than as unknown.
+        val table = Mem(Bits(4 bits), count)
+        table.init(Seq.fill(count)(B(0, 4 bits)))
+        table.setCompositeName(this, s"live_${write}_$copy")
+        table
+      }
 
       def write(port: Int, enable: Bool, address: UInt, data: Bits): Unit = {
         for (read <- 0 until readPorts) banks(port)(read).write(address, data, enable)
-        when(enable) { live(address) := Bool(port == 1) }
+
+        // Equal means bank zero and different means bank one, so a write
+        // through port zero copies the other table and a write through port
+        // one inverts it.
+        val other = live(1 - port)(LiveWriteCopy).readAsync(address).lsb
+        val mark = if (port == 0) other else !other
+        for (copy <- 0 until liveCopies) {
+          live(port)(copy).write(address, B(4 bits, default -> mark), enable)
+        }
       }
 
-      def read(port: Int, address: UInt): Bits =
-        Mux(live(address), banks(1)(port).readAsync(address), banks(0)(port).readAsync(address))
+      def read(port: Int, address: UInt): Bits = {
+        val fromOne = live(0)(port).readAsync(address).lsb ^ live(1)(port).readAsync(address).lsb
+        Mux(fromOne, banks(1)(port).readAsync(address), banks(0)(port).readAsync(address))
+      }
     }
 
     val rd = ctrl(Stages.READ)
