@@ -179,6 +179,21 @@ object Stages {
 
   val COUNT = 6
 
+  /** Boundaries where the ready is registered rather than passed through.
+    *
+    * The stall chain is the measured critical path of this core, and it is a
+    * chain because every stage passes the ready of the stage below it straight
+    * back. A skid buffer at a boundary breaks it into two shorter chains, at
+    * the price of a second copy of every payload crossing there.
+    *
+    * Decode to read is where that is cheapest: the operands have not been read
+    * yet, so the payloads crossing are the instruction, its addresses and its
+    * flags rather than three sixty-four bit values. It also splits the chain
+    * nearly in half, leaving the load/store unit three stages of arbitration to
+    * reach rather than five.
+    */
+  val ELASTIC: Set[Int] = Set(DECODE)
+
   /** Why the register read has a stage to itself.
     *
     * With the read, the forwarding network and the ALU all in execute, the

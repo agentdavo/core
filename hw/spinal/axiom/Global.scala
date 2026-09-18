@@ -47,6 +47,23 @@ object Global extends AreaObject {
     */
   val READS_RD = Payload(Bool())
 
+  /** The value this instruction will write, as far down the pipeline as it has
+    * been decided.
+    *
+    * Every plugin that produces a result offers it to the register file with a
+    * select of its own, and something has to choose between them. Choosing
+    * once per consumer means a multiplexer over every producer in every stage
+    * that forwards, and on a part where a wide multiplexer is a LUT and a long
+    * wire that was the largest single block of logic in the core.
+    *
+    * So the choice is made once, in the stage where each producer finishes,
+    * and the answer travels with the instruction. A stage adds only what
+    * finishes in it: execute picks between the arithmetic results, memory
+    * replaces it for a shift or a multiply, writeback for a load. Forwarding
+    * then reads a wire rather than a multiplexer.
+    */
+  val RESULT = Payload(Bits(AxiomParam.XLEN bits))
+
   /** Where the front end went after fetching this instruction.
     *
     * The instruction itself is not read until decode, so the address fetched

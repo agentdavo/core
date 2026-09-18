@@ -141,56 +141,60 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
     val me = ctrl(Stages.MEMORY)
     val wb = ctrl(Stages.WRITEBACK)
 
-    /** Replicate a single bit across the data path, for one-hot masking. */
-    def spread(bit: Bool): Bits = B(xlen bits, default -> bit)
-
-    /** A one-hot multiplexer built as a balanced OR tree.
-      *
-      * A chain of conditional assignments is a priority multiplexer, and its
-      * depth grows with the number of sources. These selects are mutually
-      * exclusive by construction, so masking and OR-ing is both smaller and
-      * two levels deep instead of five. The result multiplexer sits directly in
-      * the writeback to execute forwarding path, where that depth was costing
-      * about 7 ns.
-      */
-    def oneHot(choices: Seq[(Bool, Bits)]): Bits =
-      choices.map { case (sel, value) => value & spread(sel) }.reduceBalancedTree(_ | _)
-
-    /** Mux the producers whose value has actually arrived by `upTo`.
-      *
-      * A source that is not ready yet is left out rather than muxed in and
-      * ignored: its payload has no driver at that stage at all, so reading it
-      * there would not elaborate. The interlock below covers exactly the
-      * sources this leaves out.
-      */
-    class ResultMux(node: NodeApi, upTo: Int) extends Area {
-      val value = Bits(xlen bits)
-      value := B(0, xlen bits)
-      for (source <- sources if source.availableAt <= upTo) {
-        when(node(source.sel)) { value := node(source.data) }
-      }
-    }
-
     val forwardLate = AxiomParam.FORWARD_LATE_FROM_WRITEBACK.get
     val forwardBase = AxiomParam.FORWARD_BASE.get
 
-    // The commit multiplexer always sees every source; the forwarding copy may
-    // not, because a writeback-stage source drags a block RAM read into the
-    // path, which is what FORWARD_LATE_FROM_WRITEBACK trades away.
-    val forwardFromWriteback = if (forwardLate) Stages.WRITEBACK else Stages.MEMORY
-    val writebackCommit = new ResultMux(wb.down, Stages.WRITEBACK)
-    val writebackForward = if (forwardLate) writebackCommit else new ResultMux(wb.down, Stages.MEMORY)
-    val memoryResult = new ResultMux(me.down, Stages.MEMORY)
-    val executeResult = new ResultMux(ex.down, Stages.EXECUTE)
-    def wbResult = writebackForward.value
-    def memResult = memoryResult.value
-    def exResult = executeResult.value
+    /** The result, chosen once and then carried.
+      *
+      * Each stage picks between the producers that finish in it and passes on
+      * what the stage before decided, so the multiplexer in any one stage is
+      * two or three wide instead of eight, and a stage that forwards reads a
+      * payload rather than building a multiplexer of its own. Four eight-input
+      * multiplexers sixty-four bits wide were the largest single block of logic
+      * in this core.
+      *
+      * A source is only muxed in at a stage at or after the one it says it is
+      * available in. Its payload has no driver before that, so reading it
+      * earlier would not elaborate; the interlock covers exactly the sources
+      * this leaves out.
+      */
+    val result = new Area {
+      def choose(node: CtrlLink, at: Int, carried: Bits): Bits = {
+        val value = Bits(xlen bits)
+        value := carried
+        for (source <- sources if source.availableAt == at) {
+          when(node.down(source.sel)) { value := node.down(source.data) }
+        }
+        value
+      }
+
+      ex.down(Global.RESULT) := choose(ex, Stages.EXECUTE, B(0, xlen bits))
+
+      val memory = me.bypass(Global.RESULT)
+      memory := choose(me, Stages.MEMORY, me.up(Global.RESULT))
+
+      val writeback = wb.bypass(Global.RESULT)
+      writeback := choose(wb, Stages.WRITEBACK, wb.up(Global.RESULT))
+    }
+
+    /** Whether the writeback stage offers its result to the read stage at all.
+      *
+      * With one carried result there is no longer an early half of it to
+      * forward separately: the value in writeback is whatever that instruction
+      * produces, load data included. So this now means what it says, and a
+      * build that turns it off waits for every writeback producer to commit
+      * rather than only the late ones.
+      */
+    val forwardFromWriteback = if (forwardLate) Stages.WRITEBACK else Stages.READ
+    def wbResult = wb.down(Global.RESULT)
+    def memResult = me.down(Global.RESULT)
+    def exResult = ex.down(Global.RESULT)
 
     // ---- commit ---------------------------------------------------------
     val wbWritesRd = wb.down.isFiring && wb.down(Global.WRITES_RD) && wb.down(Global.RD_ADDR) =/= 0
     val wbWritesBase = wb.down.isFiring && wb.down(Global.WRITES_BASE) && wb.down(Global.RN_ADDR) =/= 0
 
-    storage.write(0, wbWritesRd, wb.down(Global.RD_ADDR), writebackCommit.value)
+    storage.write(0, wbWritesRd, wb.down(Global.RD_ADDR), wb.down(Global.RESULT))
     storage.write(1, wbWritesBase, wb.down(Global.RN_ADDR), wb.down(Global.BASE_VALUE))
 
     // ---- read and forward, both in execute --------------------------------
@@ -338,7 +342,7 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       writes = wbHasRd,
       address = wb.down(Global.RD_ADDR),
       ready = !unavailableAt(wb, Stages.WRITEBACK),
-      value = writebackCommit.value
+      value = wb.down(Global.RESULT)
     ))
 
     // ---- debug -------------------------------------------------------------
