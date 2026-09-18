@@ -265,29 +265,120 @@ is why taking eight nanoseconds out of the redirect path was worth one per
 cent. Going meaningfully faster now means changing the whole front, not the
 worst path.
 
-### What 200 MHz would take
+### What 200 MHz would take, measured this time
 
-A 5.0 ns cycle, against measured cell delays from this netlist: 0.5 ns of
-clock to output, 3.4 ns of carry chain for a 64-bit add, 0.2 ns of setup. That
-is 4.1 ns before a single wire or multiplexer, and the adder measures 4.7 in
-place.
+The first version of this section reasoned from cell delays picked out of one
+netlist. `FabricProbe` now measures each structure the pipeline is built from,
+one register-to-register path per build, on an LFE5U-45F at a 400 MHz target:
 
-**A single-cycle 64-bit add and 200 MHz are not compatible on an ECP5 -6.**
-Not difficult: arithmetically unavailable. Reaching it means an adder split
-across two stages, which makes every dependent instruction pay and changes the
-assumption the rest of the microarchitecture is built on.
+| Structure | Period | Ceiling |
+| --- | --- | --- |
+| one LUT level | 1.6 ns | 637 MHz |
+| two LUT levels | 1.8 ns | 584 MHz |
+| distributed RAM read | 4.0 ns | 249 MHz |
+| one forwarding leg, compare and multiplex | 4.2 ns | 241 MHz |
+| 32-bit add | 3.6 ns | 274 MHz |
+| 64-bit add | 4.8 ns | 209 MHz |
+| add then multiplex | 5.9 ns | 172 MHz |
+| block RAM read | 6.7 ns | 150 MHz |
+| 64-bit add as two carry selects | 6.7 ns | 151 MHz |
+| 18x18 multiply | 7.2 ns | 140 MHz |
+| 64-bit funnel shift | 7.3 ns | 137 MHz |
+| forwarding leg then add | 8.0 ns | 125 MHz |
+| four forwarding legs in series | 12.0 ns | 83 MHz |
 
-What is available, in increasing order of cost: a -8 part, worth fifteen to
-twenty-five per cent and no engineering; removing a register file read port by
-reading store data in memory rather than in the read stage, which attacks the
-fan-out rather than the depth; and a nine or ten stage pipeline with a two
-cycle ALU, which might reach 120 to 150 MHz for perhaps two thirds of the
-instructions per cycle.
+Three of those change what is worth doing.
 
-If the goal behind the number is throughput rather than clock, the two better
-levers are both already on this roadmap: M9, since the flat encoding was
-justified partly on how cheaply it widens, and caches, since at 58 MHz with a
-one-cycle memory this core is not memory bound yet.
+**Carry select is slower than the ripple it replaces**, 6.7 ns against 4.8. The
+carry chain is dedicated silicon at fifty picoseconds a bit; the multiplexer
+that replaces it is a LUT and a wire, and wires are what is expensive here. The
+textbook fix for a long adder is the wrong fix on this fabric, which also means
+the 64-bit add cannot be made much cheaper without splitting it across stages.
+
+**A block RAM read is 6.7 ns**, nearly all of it inside the primitive, so
+**150 MHz is the ceiling for any design that reads one in a cycle** — and that
+is instruction fetch, the caches and the tightly coupled memory. Putting a
+register behind it did not move the number, so the cell's own output register
+is not being used and would have to be asked for explicitly to split the access
+in two.
+
+**Four forwarding legs in series are 12.0 ns**, two thirds of it routing,
+against 4.2 for one. Any stage that reads an operand through the whole bypass
+network is capped at 83 MHz, and that is the shape of the read stage.
+
+So the honest answer to "200 MHz": not for this datapath on this part. A 64-bit
+add alone is 209 MHz before a wire; block RAM is 150. **300 MHz is not
+available at any pipeline depth** — a bare 32-bit add is 274 MHz and nothing
+useful is smaller than that. What is reachable, with the pipeline rebuilt
+around these numbers, is **120 to 150 MHz**, which is three to four times where
+the core is now.
+
+### Where the 45 MHz actually goes
+
+The core measures 45.8 MHz, 22 ns, while its slowest structure is 12. The
+difference is not any one path. The slack histogram at a 200 MHz target is a
+broad spread rather than a wall at the worst path: hundreds of endpoints sit
+between 15 and 25 ns. Fixing the worst one moves another into its place, which
+is what four rounds of doing exactly that measured — about five per cent each.
+
+The reason is visible in every critical path report: single nets of 2 to 3.4 ns
+between tiles thirty apart. Twelve thousand LUT4 spread over a 45k part, with
+control signals that every plugin reads, place far from each other and the
+wires between them cost more than the logic. Rerunning the same netlist on a
+25k part, where the die is smaller and the same design is 62 per cent full,
+gives 46.3 MHz against 43.9: worth five per cent for nothing but a shorter
+maximum distance.
+
+### The nine stage pipeline these numbers describe
+
+Balancing logic across stages is only half of it; the other half is that a
+stage may not reach across the die twice. The arrangement the measurements
+point at:
+
+| Stage | Holds | Budget |
+| --- | --- | --- |
+| F1 | program counter, prediction table read | 4.0 ns |
+| F2 | instruction memory | 6.7 ns |
+| D | decode into control payloads | 1.8 ns |
+| R | register file read | 4.0 ns |
+| B1 | first forwarding leg | 4.2 ns |
+| B2 | second forwarding leg | 4.2 ns |
+| X | the 64-bit add, alone | 4.8 ns |
+| M | data memory | 6.7 ns |
+| W | lane select and commit | 1.8 ns |
+
+The binding constraint is the memory at 6.7 ns, so this is a 150 MHz shape. Two
+things make it worth less than it looks: every stage added lengthens the
+producer-to-consumer distance, so the bypass network grows the legs that the
+extra stages were meant to spread out, and a load-use pair costs one more cycle
+per stage between the read and the use. The branch shadow does not grow, since
+the front end folds branches it has seen before and pays nothing for them.
+
+**The three things to do first**, in the order the numbers rank them: give the
+64-bit add a stage with nothing else in it; split the bypass network so no
+stage walks more than one comparison and one multiplexer; and use the block
+RAM's own output register so the memory takes two cycles instead of one long
+one.
+
+### Measured refusals
+
+Four things that looked like improvements and were not:
+
+**Carry select for the 64-bit adder**, 6.7 ns against the ripple's 4.8.
+
+**A second skid buffer**, at memory to writeback: no change in frequency for
+five hundred LUT4. The first one, at decode to read, was worth ten per cent,
+because that is where the stall chain was.
+
+**Turning writeback forwarding off**, which removes two of the six legs of the
+bypass network: 45.70 MHz against 45.76, and between nine and forty-two per
+cent more cycles. The bypass network is the longest single structure and it is
+still not what sets the clock.
+
+**Turning base forwarding off** looked free on five workloads, because none of
+them writes a base register. On a copy loop written with post-indexed accesses
+it costs nothing either; on four such accesses back to back, 192 cycles become
+480. A knob cannot be priced against programs that do not use it.
 
 ### The remaining path, and a parameter instead of an argument
 
