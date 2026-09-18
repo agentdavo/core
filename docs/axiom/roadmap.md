@@ -360,6 +360,32 @@ stage walks more than one comparison and one multiplexer; and use the block
 RAM's own output register so the memory takes two cycles instead of one long
 one.
 
+### What the path fixes came to
+
+Four rounds of reading the critical path report and fixing what it named,
+rather than what looked slow. Two seeds each, same flow:
+
+| | seed 1 | seed 2 | LUT4 |
+| --- | --- | --- | --- |
+| before | 40.2 | 36.0 | 11,392 |
+| skid buffer at decode to read | 41.7 | 41.9 | 12,788 |
+| one carried result | 43.8 | — | 12,169 |
+| memory unit decoded once | 43.9 | — | 11,295 |
+| predicates forwarded on validity | 45.8 | 42.8 | 11,717 |
+| live value table in memory | 44.2 | 45.2 | 11,327 |
+
+About seventeen per cent for no cycles and no area, and every step of it
+was a wire rather than a gate: a stall chain crossing four stages, a
+result multiplexer built four times, an opcode decoded again in every
+stage, an arbitration signal inside a forwarding network, a thirty-two to
+one multiplexer of flip-flops.
+
+That is also the argument for stopping there. Each fix moved the critical
+path to another structure of about the same length, which is what a broad
+slack histogram means: the design is not held back by one path, it is held
+back by how far its signals travel. Past this point the work is the nine
+stage shape above, not another round of this.
+
 ### Measured refusals
 
 Four things that looked like improvements and were not:
