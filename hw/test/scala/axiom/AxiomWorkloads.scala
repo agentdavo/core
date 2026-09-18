@@ -198,6 +198,61 @@ object AxiomWorkloads {
     Workload("filter", program, values, expected)
   }
 
+  /** The same copy, written the way the instruction set means it to be.
+    *
+    * Post-indexed accesses fold the pointer bump into the load and the store,
+    * so the loop is five instructions rather than seven — and every iteration
+    * reads a base register the iteration before it wrote. That is what the
+    * base forwarding path exists for, and no other workload here touches it:
+    * they all bump their pointers with an add, which is the case the ordinary
+    * result forwarding covers.
+    */
+  val indexed: Workload = {
+    val program = Assembler() { a =>
+      import a._
+      li(t0, SrcByte)
+      li(t1, DstByte)
+      li(t2, Count)
+      label("loop")
+      ldd(t3, t0, 8, Isa.Mode.POST)
+      std(t3, t1, 8, Isa.Mode.POST)
+      addi(t2, t2, -1)
+      cmpGti(p0, t2, 0)
+      bp(p0, "loop")
+      ldd(a1, t1, -8)
+      halt()
+    }
+    Workload("indexed-copy", program, values, values(SrcWord + Count - 1))
+  }
+
+  /** Indexed accesses back to back on one pointer, which is the case the base
+    * forwarding path is actually for: each access reads the pointer the one
+    * before it wrote, one instruction earlier.
+    */
+  val indexedChain: Workload = {
+    val program = Assembler() { a =>
+      import a._
+      li(t0, SrcByte)
+      li(t1, DstByte)
+      li(t2, Count / 4)
+      label("loop")
+      ldd(t3, t0, 8, Isa.Mode.POST)
+      ldd(t4, t0, 8, Isa.Mode.POST)
+      ldd(t5, t0, 8, Isa.Mode.POST)
+      ldd(t6, t0, 8, Isa.Mode.POST)
+      std(t3, t1, 8, Isa.Mode.POST)
+      std(t4, t1, 8, Isa.Mode.POST)
+      std(t5, t1, 8, Isa.Mode.POST)
+      std(t6, t1, 8, Isa.Mode.POST)
+      addi(t2, t2, -1)
+      cmpGti(p0, t2, 0)
+      bp(p0, "loop")
+      ldd(a1, t1, -8)
+      halt()
+    }
+    Workload("indexed-chain", program, values, values(SrcWord + Count - 1))
+  }
+
   val all: Seq[Workload] =
-    Seq(straightLine, sumSquares, memcpy, dotProduct, branchy, filter)
+    Seq(straightLine, sumSquares, memcpy, dotProduct, branchy, filter, indexed, indexedChain)
 }

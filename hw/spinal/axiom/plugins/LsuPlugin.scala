@@ -114,7 +114,40 @@ class LsuPlugin extends AxiomPlugin {
     perfIssue = host[PerfService].newCounter("issue")
   }
 
-  /** Shared classification of an opcode, used in three different stages. */
+  /** What the opcode means, decoded once and carried.
+    *
+    * Every stage used to work this out again from the instruction word. It is
+    * the same answer each time and it is cheap logic, so that looked free; it
+    * was not. Measured on an ECP5 the critical path began at the instruction
+    * register in execute, spent three and a half nanoseconds reaching a decode
+    * on the far side of the die, four levels of logic working out whether the
+    * instruction updates its base register, and only then reached the address
+    * adder. A register read is half a nanosecond and has no levels at all.
+    *
+    * Nine bits carry everything the later stages ask about.
+    */
+  val IS_LOAD       = Payload(Bool())
+  val IS_STORE      = Payload(Bool())
+  val IS_PAIR       = Payload(Bool())
+  val IS_STORE_PAIR = Payload(Bool())
+  val IS_ATOMIC     = Payload(Bool())
+  val ACCESS_SIZE   = Payload(UInt(2 bits))
+  val ACCESS_SIGNED = Payload(Bool())
+  val ACCESS_MODE   = Payload(UInt(2 bits))
+
+  /** The same questions, answered from the payloads rather than the opcode. */
+  class Carried(node: CtrlLink) {
+    val isLoad = node(IS_LOAD)
+    val isStore = node(IS_STORE)
+    val isPair = node(IS_PAIR)
+    val isStorePair = node(IS_STORE_PAIR)
+    val isAtomic = node(IS_ATOMIC)
+    val size = node(ACCESS_SIZE)
+    val signed = node(ACCESS_SIGNED)
+    val mode = node(ACCESS_MODE)
+  }
+
+  /** The decode itself, used once, in the decode stage. */
   class Kind(instr: Bits) {
     val opcode = instr(Isa.OP_HI downto Isa.OP_LO)
     def opIs(value: Int): Bool = opcode === B(value, 6 bits)
@@ -199,6 +232,21 @@ class LsuPlugin extends AxiomPlugin {
       node(SEL_LOAD) := node(SEL) && kind.isLoad
       node(SEL_ATOMIC) := node(SEL) && kind.isAtomic
 
+      node(IS_LOAD) := kind.isLoad
+      node(IS_STORE) := kind.isStore
+      node(IS_PAIR) := kind.isPair
+      node(IS_STORE_PAIR) := kind.isStorePair
+      node(IS_ATOMIC) := kind.isAtomic
+      node(ACCESS_SIZE) := kind.size
+      node(ACCESS_SIGNED) := kind.signed
+      node(ACCESS_MODE) := kind.mode
+
+      // An indexed access writes its base register, and the interlock in the
+      // read stage asks about that. Deciding it here rather than in execute is
+      // what keeps a decode out of the interlock's path as well as the address
+      // adder's.
+      node(Global.WRITES_BASE) := node(SEL) && kind.mode =/= Isa.Mode.OFFSET
+
       // A single store hands its data straight to the bus two stages after
       // reading it, so it is the one instruction that can start before that
       // data exists. Everything else computes with what it reads.
@@ -211,7 +259,7 @@ class LsuPlugin extends AxiomPlugin {
     val execute = new Area {
       val node = ctrl(Stages.EXECUTE)
       val instr = node(Global.INSTRUCTION)
-      val kind = new Kind(instr)
+      val kind = new Carried(node)
 
       val base = node(Global.RS_N).asUInt
       val sum = base + node(Global.IMM).asUInt
@@ -222,7 +270,6 @@ class LsuPlugin extends AxiomPlugin {
       node(ADDRESS) := address
       node(ADDR_LOW) := address(2 downto 0)
 
-      node(Global.WRITES_BASE) := node(SEL) && kind.mode =/= Isa.Mode.OFFSET
       node(Global.BASE_VALUE) := sum.asBits
 
       // A pair is two doublewords at address and address+8, so it needs the
@@ -240,7 +287,7 @@ class LsuPlugin extends AxiomPlugin {
     val memory = new Area {
       val node = ctrl(Stages.MEMORY)
       val instr = node(Global.INSTRUCTION)
-      val kind = new Kind(instr)
+      val kind = new Carried(node)
       val active = node.isValid && node(SEL)
 
       /** Second pass through this stage. A pair uses it for its second
@@ -450,7 +497,7 @@ class LsuPlugin extends AxiomPlugin {
     val writeback = new Area {
       val node = ctrl(Stages.WRITEBACK)
       val instr = node(Global.INSTRUCTION)
-      val kind = new Kind(instr)
+      val kind = new Carried(node)
 
       // A load is the only thing here that is owed an answer. Everything else
       // passes straight through, so a store never waits for memory twice.

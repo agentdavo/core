@@ -38,6 +38,15 @@ object GenerateAxiomCoreLean extends App {
   println("Wrote generated/AxiomCoreLean.v")
 }
 
+/** The core with writeback forwarding taken out, to price the two legs of the
+  * bypass network that it costs against the cycles it saves.
+  */
+object GenerateAxiomCoreNoLateFwd extends App {
+  AxiomSpinalConfig().generateVerilog(
+    new AxiomCore(forwardLateFromWriteback = false).setDefinitionName("AxiomCoreNoLateFwd"))
+  println("Wrote generated/AxiomCoreNoLateFwd.v")
+}
+
 /** The same core with the cycle accounting left out, to price it.
   *
   * The counters take an event from a stall signal in nearly every plugin and

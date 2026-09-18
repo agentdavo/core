@@ -48,8 +48,22 @@ class PredicateFilePlugin extends AxiomPlugin with PredicateService {
     val wbValue = valueAt(wb.down)
     val memValue = valueAt(me.down)
 
-    val wbWrites = wb.down.isFiring && wb.down(Global.WRITES_PD)
-    when(wbWrites) { preds(wb.down(Global.PD_ADDR)) := wbValue }
+    /** Committing and forwarding ask different questions.
+      *
+      * Writing the register asks whether this instruction is leaving now,
+      * which is the arbitration of every stage below it. Forwarding asks
+      * whether the value exists, which it does the moment the instruction is
+      * in writeback: nothing throws a transaction out of the last stage, and
+      * whether it leaves this cycle or the next does not change what it
+      * computed.
+      *
+      * Asking the first question in the second place is how the stall chain
+      * ended up inside the predicate forwarding and, through it, in front of
+      * the compare and select units. It was the critical path of the core.
+      */
+    val wbCommits = wb.down.isFiring && wb.down(Global.WRITES_PD)
+    val wbHasValue = wb.isValid && wb.down(Global.WRITES_PD)
+    when(wbCommits) { preds(wb.down(Global.PD_ADDR)) := wbValue }
 
     // Read at execute, forwarding from memory and writeback only.
     //
@@ -64,7 +78,7 @@ class PredicateFilePlugin extends AxiomPlugin with PredicateService {
     reader.load((address: UInt) => {
       val value = Bool()
       value := preds(address)
-      when(wbWrites && wb.down(Global.PD_ADDR) === address) { value := wbValue }
+      when(wbHasValue && wb.down(Global.PD_ADDR) === address) { value := wbValue }
       when(me.isValid && me.down(Global.WRITES_PD) && me.down(Global.PD_ADDR) === address) { value := memValue }
       value
     })

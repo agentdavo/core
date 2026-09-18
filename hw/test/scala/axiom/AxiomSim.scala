@@ -138,6 +138,14 @@ object AxiomSim {
           icacheBytes = icache, dcacheBytes = dcache, cacheLineBytes = line,
           plugins = AxiomProfile.cached)))
 
+  /** Writeback does not forward, so a consumer of a result still in the last
+    * stage waits for it to commit. Two of the six legs of the bypass network
+    * go away with it, and the bypass network is the critical path.
+    */
+  lazy val socWithoutLateForward: SimCompiled[AxiomSoc] =
+    config.workspaceName("AxiomSocNoLateFwd")
+      .compile(new AxiomSoc(memWords = MemWords, forwardLateFromWriteback = false))
+
   lazy val socWithoutDivider: SimCompiled[AxiomSoc] =
     config.workspaceName("AxiomSocNoDiv")
       .compile(new AxiomSoc(memWords = MemWords, withDivider = false))
