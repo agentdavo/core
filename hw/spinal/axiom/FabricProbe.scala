@@ -1,6 +1,7 @@
 package axiom
 
 import spinal.core._
+import spinal.lib._
 
 /** What one clock period buys on this part, measured rather than assumed.
   *
@@ -57,7 +58,7 @@ case class FabricProbe(xlen: Int = 64, only: Int = -1) extends Component {
     val a = in Bits (xlen bits)
     val b = in Bits (xlen bits)
     val sel = in UInt (5 bits)
-    val result = out Bits (20 * xlen bits)
+    val result = out Bits (23 * xlen bits)
   }
 
   /** One path: registers in, the structure, a register out.
@@ -214,6 +215,46 @@ case class FabricProbe(xlen: Int = 64, only: Int = -1) extends Component {
     val sel = RegNext(io.sel)
     val chosen = Mux(a(4 downto 0).asUInt === sel, b, a)
     (chosen.asUInt + b.asUInt).asBits
+  }
+
+  // 20: the same four forwarding legs as path 8, with the four comparisons in
+  // parallel and one balanced one-hot multiplexer instead of a chain. The
+  // priority between legs is resolved on the four hit bits, not on the data.
+  path(20) { (a, b) =>
+    val sel = RegNext(io.sel)
+    val hits = (0 until 4).map(stage => a(4 downto 0).asUInt === (sel + stage))
+    // newest wins: leg i is chosen when it hits and no younger leg does
+    val chosen = (0 until 4).map(i => hits(i) && !hits.take(i).fold(False)(_ || _))
+    val none = !hits.reduce(_ || _)
+    val legs = (0 until 4).map(i => b ^ B(i, xlen bits))
+    val masked = (chosen.zip(legs).map { case (c, v) => v & B(xlen bits, default -> c) }) :+
+      (a & B(xlen bits, default -> none))
+    masked.reduceBalancedTree(_ | _)
+  }
+
+  // 21: seven legs that way, which is the read port as it is built today —
+  // three result stages, each also able to write a base register — plus the
+  // register file value as the fallback.
+  path(21) { (a, b) =>
+    val sel = RegNext(io.sel)
+    val hits = (0 until 6).map(stage => a(4 downto 0).asUInt === (sel + stage))
+    val chosen = (0 until 6).map(i => hits(i) && !hits.take(i).fold(False)(_ || _))
+    val none = !hits.reduce(_ || _)
+    val legs = (0 until 6).map(i => b ^ B(i * 3, xlen bits))
+    val masked = (chosen.zip(legs).map { case (c, v) => v & B(xlen bits, default -> c) }) :+
+      (a & B(xlen bits, default -> none))
+    masked.reduceBalancedTree(_ | _)
+  }
+
+  // 22: six legs as the chain they are today, for the like-for-like number.
+  path(22) { (a, b) =>
+    val sel = RegNext(io.sel)
+    var value = a
+    for (stage <- 0 until 6) {
+      val hit = value(4 downto 0).asUInt === (sel + stage)
+      value = Mux(hit, b ^ B(stage * 3, xlen bits), value)
+    }
+    value
   }
 
   // 15: add then multiplex, the ALU result path in miniature.
