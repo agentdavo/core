@@ -256,26 +256,45 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       */
     /** One read port, and the forwarding around it.
       *
-      * A chain of conditional assignments, which is a priority multiplexer.
-      * The obvious alternative, resolving priority on the one-bit selects and
-      * then applying them to the data as a one-hot multiplexer, was tried and
-      * measured: 13 per cent more area for 4 per cent more frequency, because
-      * yosys did not merge the mask and OR pairs into single LUT4s. On a part
-      * where the critical path is 62 per cent routing, more area is the wrong
-      * trade, so the shallower form was reverted.
+      * Six legs, each a producer stage writing either its destination or its
+      * base register, with the register file's own value as the fallback and
+      * the youngest producer winning. Written as a chain of conditional
+      * assignments that is a priority multiplexer six deep, and it measured
+      * 15.8 ns on the fabric probe: a compare, a multiplexer and a wire, six
+      * times in series.
       *
-      * Assignments run oldest first so the newest producer wins.
+      * So the priority is resolved on the six hit bits, which are one LUT
+      * each, and the data goes through one balanced one-hot multiplexer. The
+      * same legs that way measured 7.4 ns. An earlier note here recorded the
+      * one-hot form as more area for little speed; that was measured when the
+      * read port was not the critical structure of the core, and it is now.
+      *
+      * Legs are listed youngest first, because that is the priority.
       */
     class ReadPort(port: Int, address: UInt) extends Area {
+      def hits(writes: Bool, producer: UInt): Bool = writes && producer === address
+
+      val legs = ArrayBuffer[(Bool, Bits)]()
+      legs += hits(exWritesRd, ex.down(Global.RD_ADDR)) -> exResult
+      if (forwardBase) legs += hits(exWritesBase, ex.down(Global.RN_ADDR)) -> ex.down(Global.BASE_VALUE)
+      legs += hits(memWritesRd, me.down(Global.RD_ADDR)) -> memResult
+      if (forwardBase) legs += hits(memWritesBase, me.down(Global.RN_ADDR)) -> me.down(Global.BASE_VALUE)
+      if (forwardLate) {
+        legs += hits(wbHasRd, wb.down(Global.RD_ADDR)) -> wbResult
+        if (forwardBase) legs += hits(wbHasBase, wb.down(Global.RN_ADDR)) -> wb.down(Global.BASE_VALUE)
+      }
+
+      val hit = legs.map(_._1)
+      // Chosen when it hits and nothing younger does.
+      val chosen = hit.zipWithIndex.map { case (h, i) => h && !hit.take(i).fold(False)(_ || _) }
+      val fromFile = !hit.reduce(_ || _)
+
+      def spread(bit: Bool): Bits = B(xlen bits, default -> bit)
+      val candidates = chosen.zip(legs.map(_._2)).map { case (c, v) => v & spread(c) } :+
+        (storage.read(port, address) & spread(fromFile))
+
       val value = Bits(xlen bits)
-      value := storage.read(port, address)
-      if (forwardBase) when(wbHasBase && wb.down(Global.RN_ADDR) === address) { value := wb.down(Global.BASE_VALUE) }
-      when(wbHasRd && wb.down(Global.RD_ADDR) === address) { value := wbResult }
-      if (forwardBase) when(memWritesBase && me.down(Global.RN_ADDR) === address) { value := me.down(Global.BASE_VALUE) }
-      when(memWritesRd && me.down(Global.RD_ADDR) === address) { value := memResult }
-      if (forwardBase) when(exWritesBase && ex.down(Global.RN_ADDR) === address) { value := ex.down(Global.BASE_VALUE) }
-      when(exWritesRd && ex.down(Global.RD_ADDR) === address) { value := exResult }
-      when(address === 0) { value := B(0, xlen bits) }
+      value := candidates.reduceBalancedTree(_ | _) & spread(address =/= 0)
     }
 
     val readRn = new ReadPort(storage.PortRn, rd.down(Global.RN_ADDR))

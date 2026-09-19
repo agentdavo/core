@@ -286,6 +286,9 @@ one register-to-register path per build, on an LFE5U-45F at a 400 MHz target:
 | 64-bit funnel shift | 7.3 ns | 137 MHz |
 | forwarding leg then add | 8.0 ns | 125 MHz |
 | four forwarding legs in series | 12.0 ns | 83 MHz |
+| six forwarding legs in series | 15.8 ns | 63 MHz |
+| six forwarding legs as a one-hot | 7.4 ns | 135 MHz |
+| block RAM read, output register on | 1.0 ns clock to out | see below |
 
 Three of those change what is worth doing.
 
@@ -300,7 +303,12 @@ the 64-bit add cannot be made much cheaper without splitting it across stages.
 is instruction fetch, the caches and the tightly coupled memory. Putting a
 register behind it did not move the number, so the cell's own output register
 is not being used and would have to be asked for explicitly to split the access
-in two.
+in two. It was, in `synth/ebr_probe.sh`: the same DP16KD instantiated by hand
+with `REGMODE=OUTREG` has a clock-to-out of 1.0 ns against 5.8, and the cell
+alone passes 500 MHz. yosys 0.33 maps every inferred memory with NOREG and
+has no option to do otherwise, so the ceiling was the mapping, not the part.
+The price is that a memory access becomes two cycles and the cell is
+instantiated rather than inferred.
 
 **Four forwarding legs in series are 12.0 ns**, two thirds of it routing,
 against 4.2 for one. Any stage that reads an operand through the whole bypass
@@ -430,12 +438,117 @@ a hazard shape it was missing.
 `FORWARD_LATE_FROM_WRITEBACK` is therefore a parameter rather than a decision,
 and both settings are measured rather than argued about.
 
+### The read port as a one-hot
+
+The bypass network was measured as the chain it is built as — six legs, each
+a compare and a multiplexer on the data of the one before — and as the same
+six legs with the comparisons in parallel, the priority resolved on the six
+hit bits, and one balanced one-hot multiplexer of the data: 15.8 ns against
+7.4, the same function at half the depth and no extra stage. The read port is
+now written that way. An earlier note here recorded one-hot multiplexers as
+thirteen per cent more area for nothing; that was one-hot everywhere, and the
+number was right for that. This is one-hot where the chain was six deep.
+
+It did not move the clock on its own: the read port left the critical path
+and the memory unit's atomic sequence took its place at 18.5 ns. It costs
+1,358 LUT4, twelve per cent, for the two ports. That is the broad slack
+histogram again, and the reason the port was rewritten anyway is that the
+nine stage shape needs a bypass a stage can walk in one leg, and a chain
+cannot be split where a one-hot can. The area is the price of the shape,
+paid before the shape pays back, and it is recorded here so that it is not
+mistaken later for a free change.
+
+### A counter that is not a stage
+
+Using the block RAM's register makes instruction memory answer in two cycles,
+and the front end had to be able to afford that before the register was worth
+asking for. It could not: the fetch stage held its transaction until decode
+took it, and issued the next command only when the next transaction arrived,
+so a two-cycle memory halved the instruction rate. Measured, with the tightly
+coupled memory set to answer in two cycles instead of one:
+
+| Workload | Latency 1 | Latency 2, before | Latency 2, now |
+| --- | --- | --- | --- |
+| straight-line | 717 | 1,427 (+99%) | 721 (+1%) |
+| sum-of-squares | 217 | 348 (+60%) | 241 (+10%) |
+| memcpy | 464 | 920 (+98%) | 533 (+15%) |
+| dot-product | 366 | 533 (+46%) | 434 (+18%) |
+| branchy | 631 | 995 (+58%) | 702 (+10%) |
+| filter | 689 | 1,099 (+60%) | 766 (+9%) |
+| indexed-copy | 336 | 664 (+98%) | 404 (+20%) |
+| indexed-chain | 192 | 376 (+96%) | 261 (+36%) |
+
+The program counter is no longer a pipeline stage. It advances when a command
+is accepted by the memory, not when a transaction leaves fetch, and three
+small queues in issue order sit between the counter and decode: the addresses
+accepted and not yet taken into the pipeline, a tag per command not yet
+answered, and the words answered and not yet taken. The fetch stage proper is
+the head of the address queue. Everything is in order, so decode always takes
+the next word because the next word is always its own; a transaction thrown
+before its word arrived leaves a dead tag where it stands, and the answer is
+dropped when it comes. A redirect empties the address queue and kills every
+tag except the one for an instruction staying in decode, which is the one
+that asked for the redirect.
+
+What is left in the table is loads, which are still issued one at a time and
+each pay the extra cycle, and it is the same shape of work again on the data
+side. On a one-cycle memory every workload counts exactly what it did before,
+which took two more things than the design: an address accepted while the
+queue is empty goes to the stage in the same cycle, since the cycle after a
+redirect is exactly when the queue is empty; and a transaction being thrown
+out of decode no longer holds the stage for the word it was waiting for, since
+a halt on a stage is also a refusal to the stage in front of it.
+
+Three of the bugs on the way are worth writing down as the kind of thing the
+tests are for. The cache picked the half of a doubleword from one register
+captured on acceptance, which was right for one command outstanding and
+returned instruction 0 as instruction 4 with two. The word queue's count was
+decremented for a word taken straight off the bus and wrapped, after which the
+queue served zeros for ever. And a room check that counted words owed but not
+tags let a fourth command out past a three-deep tag queue, after which every
+word went to the instruction before its own; the program that showed it was
+a loop that took its branch relative to the wrong address and halted early,
+which looked nothing like a queue overflow until the trace was read.
+
+**What it costs on the part**, in three measured steps. The first version
+shifted every queue, a multiplexer per bit per entry, and three addresses of
+130 bits made that 1,852 LUT4. As rings — an entry written once when pushed,
+the head chosen by a pointer — the same queues were 908 LUT4, and 38.9 MHz:
+the critical path now started at the word queue's head pointer, in front of
+the branch fold in decode, which is the longest path in the core, and ended
+at the redirect gating the clock enables of the address entries. So the
+words shift again, since the head of a shift queue is a register and not a
+register behind a multiplexer, the addresses stay a ring, and a record
+accepted on the cycle of a redirect is pushed and flushed together, or
+offered to the stage under the old generation and thrown by decode's
+compare, rather than gated. That is 1,205 LUT4 and 500 flip-flops over the
+one-hot read port, most of them the addresses themselves. Two seeds, same
+flow as the table above:
+
+| | seed 2 | seed 3 | LUT4 |
+| --- | --- | --- | --- |
+| after the path fixes | 45.2 | 42.6 | 11,550 |
+| read port as a one-hot | 44.5 | 41.9 | 12,908 |
+| front end, queues shifting | — | — | 14,760 |
+| front end, queues as rings | — | 38.9 | 13,816 |
+| front end, words shifting, addresses a ring | 46.4 | 43.4 | 14,113 |
+
+The clock is where it was, within the spread two seeds show, and the
+critical path is back on the multiplier's result forwarded into the next
+operand, which is where it was before any of this. What was bought is that
+the memory can now take two cycles without the core noticing on straight
+line code, which is the condition for using the block RAM's register at all.
+
 ### What is left
 
-The frequency work has reached the point where the next step is architectural
-rather than an optimisation, and that step is described above. It should wait
-anyway: a deeper pipeline changes what the memory protocol has to tolerate, so
-the protocol comes first.
+The front end can now afford a two-cycle instruction memory, so the next step
+is to ask for the block RAM's register: a memory component that instantiates
+the DP16KD with its output register for the tightly coupled memory and the
+cache arrays, with a simulation model beside it that a test checks against
+the vendor cell model. The data side then needs the same treatment the
+instruction side just had, one outstanding load at a time being what the
+table above still shows. After that, the nine stage shape: the bypass split
+across two stages and the 64-bit add given one of its own.
 
 ## M5 Stallable memory — done
 

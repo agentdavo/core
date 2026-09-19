@@ -31,6 +31,9 @@ import spinal.lib._
   *   64-bit funnel shift               7.3 ns    137 MHz
   *   forwarding leg then add           8.0 ns    125 MHz
   *   four forwarding legs in series   12.0 ns     83 MHz
+  *   six forwarding legs in series    15.8 ns     63 MHz
+  *   six forwarding legs as a one-hot  7.4 ns    135 MHz
+  *   block RAM read, output register   1.0 ns  clock to out, was 5.8
   * }}}
   *
   * Three of those are worth stopping at.
@@ -48,9 +51,19 @@ import spinal.lib._
   *
   * **A block RAM read is 6.7 ns whatever you put around it**, nearly all of it
   * inside the primitive, so 150 MHz is the ceiling for a design that reads one
-  * in a cycle. Adding a register behind it did not move the number, so the
-  * cell's own output register is not being used and would have to be asked for
-  * explicitly.
+  * in a cycle. Adding a register behind it did not move the number, because
+  * the cell's own output register is not being used: yosys 0.33 maps every
+  * inferred memory with REGMODE=NOREG and has no option to do otherwise.
+  * `synth/ebr_probe.sh` instantiates the DP16KD both ways, and with OUTREG
+  * the clock-to-out goes from 5.8 ns to 1.0. The memory then takes two cycles
+  * and stops being the binding structure, at the price of instantiating the
+  * cell rather than inferring it.
+  *
+  * **The bypass network's depth is its shape, not its size.** Six legs as the
+  * chain of compare-then-multiplex the read port was built as: 15.8 ns. The
+  * same six legs with the comparisons in parallel, the priority resolved on
+  * the hit bits and one balanced one-hot multiplexer: 7.4 ns. Same function,
+  * half the delay, no extra stage.
   */
 case class FabricProbe(xlen: Int = 64, only: Int = -1) extends Component {
 

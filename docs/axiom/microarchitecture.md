@@ -231,18 +231,27 @@ command is accepted when `enable` and `ready` meet; an accepted read answers
 later with `rvalid`, in order; a write needs acceptance and nothing more, which
 is what keeps a store to a tightly coupled memory at one cycle.
 
-At most one command per port is outstanding, which is what lets each port's
+On the data port at most one command is outstanding, which is what lets its
 response buffer be one entry deep. That is arranged by construction rather than
-by counting: a stage offers its command only on a cycle where the transaction
-holding it can move on. In fetch that is a correctness requirement rather than
-a simplification. A transaction left sitting in fetch with an accepted command
-would have its program counter changed under it by a redirect, and would reach
-decode carrying the new counter, the new generation, and the instruction from
-the old address, passing every check on the way.
+by counting: the memory stage offers its command only on a cycle where the
+transaction holding it can move on.
+
+The instruction port keeps several commands out, because a memory that answers
+in two cycles would otherwise halve the instruction rate. The program counter
+is not a pipeline stage: it advances when a command is accepted, and three
+small queues in issue order sit between it and decode — the addresses accepted
+and not yet taken into the pipeline, a tag per command not yet answered, and
+the words answered and not yet taken. The fetch stage proper is the head of
+the address queue. The invariant that makes it safe is that everything is in
+order, so decode always takes the next word and the next word is always its
+own; a transaction thrown before its word arrived leaves a dead tag where it
+stands, and the answer is dropped when it comes. A redirect empties the
+address queue and kills every tag but the one for an instruction staying in
+decode, which is the one that asked.
 
 Buffering is what the contract costs. `rvalid` is a pulse, and the stage that
 wants it may be held for an unrelated reason on the cycle it arrives, so fetch
-buffers into decode and the load/store unit buffers into writeback. The
+queues words into decode and the load/store unit buffers into writeback. The
 load/store unit's buffer has a second reader: an atomic takes its response in
 the memory stage, because its second pass computes what it writes from what the
 first pass read.

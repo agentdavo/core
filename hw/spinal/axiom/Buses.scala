@@ -22,10 +22,11 @@ import spinal.lib._
   *    enable and impossible for anything with a queue behind it, so the core
   *    captures each response into a one-deep buffer of its own instead.
   *
-  * The core keeps at most one command outstanding per port, which is what lets
-  * that buffer be one deep. It does so by construction rather than by counting:
-  * a stage issues its command only when the transaction holding it can move on,
-  * so a stalled pipeline cannot run ahead of its own responses.
+  * The core keeps a bounded number of commands outstanding per port and
+  * buffers that many responses: one on the data port, where a stage issues
+  * its command only when the transaction holding it can move on, and a few
+  * on the instruction port, where the fetch unit counts what it has out so
+  * that a memory answering in two cycles is still asked every cycle.
   */
 case class IBus(addressWidth: Int) extends Bundle with IMasterSlave {
   val enable  = Bool()

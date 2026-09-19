@@ -51,7 +51,32 @@ trait PcService {
     * gets the generation compare on its own.
     */
   def generationOk(node: NodeApi): Bool
+
+  /** What the counter offers fetch this cycle: an address, the generation
+    * it belongs to and the guess about what follows it. Only valid to call
+    * from a build phase.
+    */
+  def offer: PcOffer
+
+  /** Fetch loads this with the cycle it takes the offer, and the counter
+    * moves on. The counter is not a pipeline stage: it advances when a
+    * command goes out, not when a transaction leaves, so that commands can
+    * go out faster than transactions move while the memory is still
+    * answering the first.
+    */
+  def accepted: Handle[Bool]
+
+  /** Is the program counter being moved this cycle?
+    *
+    * Fetch asks, because every command it has out for the current counter
+    * belongs to nobody once the counter moves. Only valid to call from a
+    * build phase.
+    */
+  def redirectNow: Bool
 }
+
+/** What the program counter is offering to fetch. */
+case class PcOffer(pc: UInt, gen: UInt, next: UInt)
 
 /** The guess about where the instruction at a given address goes next.
   *

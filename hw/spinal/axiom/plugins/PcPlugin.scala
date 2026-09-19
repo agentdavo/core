@@ -37,28 +37,27 @@ class PcPlugin extends AxiomPlugin with PcService {
 
   override def generationOk(node: NodeApi): Bool = node(Global.FETCH_GEN) === generation.get
 
-  val logic = during build new Area {
-    val node = ctrl(Stages.FETCH)
+  private val redirecting = spinal.core.fiber.Handle[Bool]()
 
+  override def redirectNow: Bool = redirecting.get
+
+  private val offered = spinal.core.fiber.Handle[PcOffer]()
+
+  override def offer: PcOffer = offered.get
+
+  override val accepted = spinal.core.fiber.Handle[Bool]()
+
+  val logic = during build new Area {
     val pc  = Reg(UInt(AxiomParam.PC_WIDTH bits)) init AxiomParam.RESET_VECTOR.get
     val gen = Reg(UInt(2 bits)) init 0
     generation.load(gen)
 
-    // Fetch always has something to offer: there is always a next address.
-    //
-    // Which address that is comes from the branch unit rather than from a plus
-    // four here. It is a guess made without having read the instruction, and
-    // it travels with the instruction so that decode can check it.
+    // Which address comes next is asked of the branch unit rather than
+    // computed as a plus four here. It is a guess made without having read the
+    // instruction, and it travels with the instruction so that decode can
+    // check it.
     val next = host[PredictorService].nextPc(pc)
-
-    node.up.valid := True
-    node.up(Global.PC) := pc
-    node.up(Global.FETCH_GEN) := gen
-    node.up(Global.PREDICTED_NEXT) := next
-
-    when(node.up.isFiring) {
-      pc := next
-    }
+    offered.load(PcOffer(pc, gen, next))
 
     // Shallowest first, so a redirect from a deeper stage is assigned last and
     // therefore wins. The deeper instruction is the older one, and an older
@@ -75,7 +74,18 @@ class PcPlugin extends AxiomPlugin with PcService {
     when(anyRedirect) {
       gen := gen + 1
     }
+    redirecting.load(anyRedirect)
     perfRedirect := anyRedirect
+
+    // The counter moves when fetch has a command out for it. A command
+    // accepted on the cycle of a redirect is for the address being left, and
+    // the redirect wins.
+    //
+    // Fetch loads the accept only after it has read the redirect above, so
+    // this waits on it last: the two builds meet in the middle.
+    when(accepted.get && !anyRedirect) {
+      pc := next
+    }
 
     // Kill the branch shadow. Every instruction already inside the pipeline
     // and younger than the redirecting one needs an explicit throw, because it

@@ -12,9 +12,9 @@ import spinal.lib._
   * through a core.
   *
   * The instruction port is thirty-two bits wide and the cache sixty-four, so
-  * the half is picked from a bit of the address held from the command. Only
-  * one command is outstanding, so one register holds it however long a refill
-  * takes.
+  * the half is picked from a bit of the address, carried through a queue in
+  * command order so that it lines up with the answer however many commands
+  * are in flight and however long a refill takes.
   */
 class CachePlugin extends AxiomPlugin with MemoryService {
 
@@ -91,10 +91,6 @@ class CachePlugin extends AxiomPlugin with MemoryService {
     }
 
     // ---- instruction side -------------------------------------------------
-    // The bus carries 32-bit instructions and the memory 64-bit words, so the
-    // half is picked by a bit of the address held from the command. Only one
-    // command is outstanding, so one register holds it however long a refill
-    // takes.
     val instructionWide = DBus(AxiomParam.PC_WIDTH.get, xlen)
     instructionWide.enable := instructionPort.enable
     instructionWide.address := instructionPort.address
@@ -107,9 +103,30 @@ class CachePlugin extends AxiomPlugin with MemoryService {
     cacheOrNot(AxiomParam.ICACHE_BYTES.get, writes = false, instructionWide, instructionBacking,
       perfIcacheMiss)
 
+    /** Which half of the doubleword each command in flight wants.
+      *
+      * One register captured on acceptance was enough while one command was
+      * outstanding. With two, the first answer arrived while the register
+      * held the second command's bit, and instruction 0 came back as
+      * instruction 4: two fetches from the same doubleword, one half. The
+      * memory answers in order, so the bits go through a queue in order.
+      */
     val instructionAccepted = instructionPort.enable && instructionWide.ready
-    val instructionHigh = RegNextWhen(instructionPort.address(2), instructionAccepted) init False
-    instructionPort.data := Mux(instructionHigh,
+    val halves = new Area {
+      val Depth = FetchPlugin.InFlight
+      val bits = Vec.fill(Depth)(Reg(Bool()) init False)
+      val count = Reg(UInt(log2Up(Depth + 1) bits)) init 0
+      val pop = instructionWide.rvalid
+      val push = instructionAccepted
+      val slot = Mux(pop, count - 1, count)
+      for (i <- 0 until Depth) {
+        val next = if (i + 1 < Depth) bits(i + 1) else False
+        bits(i) := Mux(push && slot === i, instructionPort.address(2), Mux(pop, next, bits(i)))
+      }
+      count := count + push.asUInt - pop.asUInt
+      val head = bits(0)
+    }
+    instructionPort.data := Mux(halves.head,
       instructionWide.rdata(xlen - 1 downto 32), instructionWide.rdata(31 downto 0))
 
     // ---- data side --------------------------------------------------------
