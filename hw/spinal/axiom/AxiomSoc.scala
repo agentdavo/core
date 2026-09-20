@@ -222,6 +222,8 @@ class AxiomSoc(
     val icacheBytes: Int = 4096,
     val dcacheBytes: Int = 4096,
     val cacheLineBytes: Int = 32,
+    val tcmTwoCycle: Boolean = false,
+    val ebrNative: Boolean = false,
     val plugins: Seq[Hostable] = AxiomProfile.base
 ) extends Component {
 
@@ -234,7 +236,7 @@ class AxiomSoc(
   val host = database on {
     AxiomParam.base(resetVector, memWords, withMultiplier, withAtomics, withDivider, forwardLateFromWriteback,
       forwardBase, withDebugRegFilePort, withPerfCounters, memoryStall, memoryLatency,
-      icacheBytes, dcacheBytes, cacheLineBytes)
+      icacheBytes, dcacheBytes, cacheLineBytes, tcmTwoCycle, ebrNative)
     val created = new PluginHost()
     // Registering a holder, not the component, lets a plugin reach the
     // interface without the interface having to know which plugins exist.

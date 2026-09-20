@@ -90,7 +90,7 @@ SYNTH_FLAGS="-top ${TOP} -json ${OUTDIR}/${TOP}.json"
 
 echo "== yosys: ${TOP} from ${VERILOG}"
 yosys -q -l "${OUTDIR}/yosys.log" \
-  -p "read_verilog -sv ${VERILOG}; synth_ecp5 ${SYNTH_FLAGS}; tee -o ${OUTDIR}/stat.txt stat -top ${TOP}"
+  -p "read_verilog -lib /usr/share/yosys/ecp5/cells_bb.v; read_verilog -sv ${VERILOG}; synth_ecp5 ${SYNTH_FLAGS}; tee -o ${OUTDIR}/stat.txt stat -top ${TOP}"
 
 if [[ $PNR -eq 0 ]]; then
   echo "== stopped after synthesis, see ${OUTDIR}/stat.txt"

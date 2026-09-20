@@ -229,7 +229,10 @@ anywhere else, which is exactly what adding the read stage demonstrated.
 Both ports use a ready/valid contract with no promised latency and no hold. A
 command is accepted when `enable` and `ready` meet; an accepted read answers
 later with `rvalid`, in order; a write needs acceptance and nothing more, which
-is what keeps a store to a tightly coupled memory at one cycle.
+is what keeps a store to a tightly coupled memory at one cycle. The tightly
+coupled memory answers in one cycle inferred, or in two as the block RAM
+cells with their output registers on (`EbrRam`), which is the build that
+synthesis measures.
 
 On the data port at most one command is outstanding, which is what lets its
 response buffer be one entry deep. That is arranged by construction rather than

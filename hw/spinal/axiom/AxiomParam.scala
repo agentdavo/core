@@ -91,6 +91,21 @@ object AxiomParam {
     */
   val MEMORY_STALL = Database.blocking[Int]()
 
+  /** Whether the tightly coupled memory answers in two cycles rather than one.
+    *
+    * Two is what the block RAM's own output register costs, and what the
+    * front end was rebuilt to afford. One is what every test not about the
+    * memory runs on.
+    */
+  val TCM_TWO_CYCLE = Database.blocking[Boolean]()
+
+  /** Whether a two-cycle memory instantiates the block RAM cell rather than
+    * modelling it. The cell is what synthesis needs; the model is what every
+    * other simulation runs on, and `hw/verilog/DP16KD.v` is what a simulation
+    * of the cell runs on.
+    */
+  val EBR_NATIVE = Database.blocking[Boolean]()
+
   /** Cycles the backing memory takes to answer, and the minimum gap between
     * commands. One is a memory that answers next cycle; anything larger is
     * what makes a cache worth having.
@@ -138,7 +153,9 @@ object AxiomParam {
       memoryLatency: Int = 1,
       icacheBytes: Int = 4096,
       dcacheBytes: Int = 4096,
-      cacheLineBytes: Int = 32
+      cacheLineBytes: Int = 32,
+      tcmTwoCycle: Boolean = false,
+      ebrNative: Boolean = false
   ): Unit = {
     XLEN.set(Isa.XLEN)
     PC_WIDTH.set(Isa.XLEN)
@@ -160,6 +177,8 @@ object AxiomParam {
     ICACHE_BYTES.set(icacheBytes)
     DCACHE_BYTES.set(dcacheBytes)
     CACHE_LINE_BYTES.set(cacheLineBytes)
+    TCM_TWO_CYCLE.set(tcmTwoCycle)
+    EBR_NATIVE.set(ebrNative)
   }
 }
 

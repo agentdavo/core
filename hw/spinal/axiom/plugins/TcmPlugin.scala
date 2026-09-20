@@ -8,13 +8,16 @@ import spinal.lib._
   * that simulation uses to load programs and read results back.
   *
   * The memory is 64 bits wide. Instructions are 32, so the fetch port reads a
-  * doubleword and picks the half, with the selection delayed by one cycle to
-  * match the registered read.
+  * doubleword and picks the half, with the selection delayed to match the
+  * registered read.
   *
-  * It answers the cycle after a command is accepted, which is the best a
-  * memory can do and what the core is tuned for. What it no longer promises is
-  * to hold that answer until somebody reads it: the core buffers responses
-  * itself, because a cache could not make that promise.
+  * It answers a fixed number of cycles after a command is accepted: one from
+  * an inferred memory, which is the best a memory can do and what the core
+  * was first tuned for, or two from the block RAM with its own output
+  * register on, which is what lets the memory stop being the slowest thing on
+  * the part. What it does not promise is to hold that answer until somebody
+  * reads it: the core buffers responses itself, because a cache could not
+  * make that promise.
   *
   * `MEMORY_STALL` makes it refuse commands pseudo-randomly instead of always
   * accepting. That is not a feature of the memory, it is how the stallable
@@ -50,8 +53,8 @@ class TcmPlugin extends AxiomPlugin with MemoryService {
     val xlen = AxiomParam.XLEN.get
     val wordAddressBits = log2Up(words)
 
-    val ram = Mem(Bits(xlen bits), words)
-    ram.init(Seq.fill(words)(B(0, xlen bits)))
+    val twoCycle = AxiomParam.TCM_TWO_CYCLE.get
+    val latency = if (twoCycle) EbrRam.Latency else 1
 
     /** Refuse a command now and then, so the wait states get exercised.
       *
@@ -77,14 +80,12 @@ class TcmPlugin extends AxiomPlugin with MemoryService {
     // ---- instruction port -----------------------------------------------
     val fetchAccepted = instructionPort.enable && !stall.busy
     instructionPort.ready := !stall.busy
-    instructionPort.rvalid := RegNext(fetchAccepted) init False
-
-    val fetched = ram.readSync(
-      address = wordIndex(instructionPort.address),
-      enable = fetchAccepted
-    )
-    val fetchedHigh = RegNextWhen(instructionPort.address(2), fetchAccepted) init False
-    instructionPort.data := Mux(fetchedHigh, fetched(xlen - 1 downto 32), fetched(31 downto 0))
+    instructionPort.rvalid := Delay(fetchAccepted, latency, init = False)
+    val fetchAddress = wordIndex(instructionPort.address)
+    // Several fetches may be out at once, so the half each one wants travels
+    // down a delay line as long as the memory's latency, not a register held
+    // from acceptance.
+    val fetchedHigh = Delay(instructionPort.address(2), latency, init = False)
 
     // ---- data port, shared with the debug port ---------------------------
     // The debug port wins while it is enabled, which is only meant to happen
@@ -94,7 +95,7 @@ class TcmPlugin extends AxiomPlugin with MemoryService {
     // way they would behind a shared interconnect.
     val dataAccepted = dataPort.enable && !stall.busy
     dataPort.ready := !stall.busy
-    dataPort.rvalid := RegNext(dataAccepted && !dataPort.write) init False
+    dataPort.rvalid := Delay(dataAccepted && !dataPort.write, latency, init = False)
 
     val address = Mux(soc.io.dbgMemEnable, soc.io.dbgMemAddr, wordIndex(dataPort.address))
     val write   = Mux(soc.io.dbgMemEnable, soc.io.dbgMemWrite, dataAccepted && dataPort.write)
@@ -102,9 +103,29 @@ class TcmPlugin extends AxiomPlugin with MemoryService {
     val mask    = Mux(soc.io.dbgMemEnable, B(0xff, 8 bits), dataPort.mask)
     val read    = soc.io.dbgMemEnable || (dataAccepted && !dataPort.write)
 
-    ram.write(address = address, data = wdata, enable = write, mask = mask)
-    val readData = ram.readSync(address = address, enable = read)
+    val fetched = Bits(xlen bits)
+    val readData = Bits(xlen bits)
 
+    val inferred = !twoCycle generate new Area {
+      val ram = Mem(Bits(xlen bits), words)
+      ram.init(Seq.fill(words)(B(0, xlen bits)))
+      fetched := ram.readSync(address = fetchAddress, enable = fetchAccepted)
+      ram.write(address = address, data = wdata, enable = write, mask = mask)
+      readData := ram.readSync(address = address, enable = read)
+    }
+
+    val blockRam = twoCycle generate new Area {
+      val ram = EbrRam(words, xlen, native = AxiomParam.EBR_NATIVE.get)
+      ram.io.b.address := fetchAddress
+      fetched := ram.io.b.rdata
+      ram.io.a.address := address
+      ram.io.a.write := write
+      ram.io.a.wdata := wdata
+      ram.io.a.mask := mask
+      readData := ram.io.a.rdata
+    }
+
+    instructionPort.data := Mux(fetchedHigh, fetched(xlen - 1 downto 32), fetched(31 downto 0))
     dataPort.rdata := readData
     soc.io.dbgMemRData := readData
   }

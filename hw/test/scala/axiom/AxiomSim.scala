@@ -280,8 +280,8 @@ object AxiomSim {
         for (index <- readRange) {
           require(index >= 0 && index < MemWords, s"read index $index out of range")
           dut.io.dbgMemAddr #= index
-          dut.clockDomain.waitSampling()
-          dut.clockDomain.waitSampling()
+          // Long enough for a memory that answers in two cycles.
+          dut.clockDomain.waitSampling(3)
           memory(index) = dut.io.dbgMemRData.toBigInt.toLong
         }
         dut.io.dbgMemEnable #= false

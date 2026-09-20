@@ -539,16 +539,66 @@ operand, which is where it was before any of this. What was bought is that
 the memory can now take two cycles without the core noticing on straight
 line code, which is the condition for using the block RAM's register at all.
 
+### The block RAM's register, asked for
+
+`EbrRam` is the tightly coupled memory as the DP16KD cells the part has,
+instantiated with `REGMODE=OUTREG`: nine bits wide, one cell per byte so the
+byte mask is a write enable per cell and no read-modify-write is needed, a
+bank of cells per 2,048 words, and the bank select delayed two cycles to
+meet the data. It answers two cycles after the address, always; the clock
+enables are tied on and the memory plugin counts cycles from acceptance. The
+same component without `native` is a `Mem` with two registers behind it,
+which is what every test not about the cell runs on.
+
+yosys ships the cell as an empty stub, so there is nothing vendor-written to
+simulate it against. `hw/verilog/DP16KD.v` is a model written from the
+datasheet, covering what the core uses of the cell, and the bit-address
+convention in it — the row at `AD[13:3]` at nine bits wide — is taken from
+yosys's own mapping of inferred memories onto the cell, which is the one
+reading of the datasheet that is known to produce working bitstreams.
+`AxiomEbrSpec` runs every workload and eight random programs on the model
+and on the cells and requires them to agree to the cycle and on every
+register and memory word, which checks the wiring round the cell rather
+than the cell. That is the honest extent of it.
+
+The cycle cost is exactly the table above: the two-cycle memory as cells
+counts what the two-cycle memory as a model counts, which counts what the
+backing memory set to two cycles counted. The core has no memory in it, so
+the clock is measured at the system level, `AxiomSocEbr` against
+`AxiomSocInferred`, the same system with the memory inferred:
+
+| | seed 2 | seed 3 | LUT4 | DP16KD |
+| --- | --- | --- | --- | --- |
+| memory inferred, one cycle | 35.4 | 32.7 | 13,654 | 32 |
+| memory as cells, two cycles | 40.1 | 38.6 | 13,579 | 16 |
+
+Thirteen and eighteen per cent, and it is the one change so far whose
+effect is visible in the critical path report rather than inferred from
+the aggregate. The inferred build's path opens with a 5.8 ns source delay
+out of `DOB3` on a block RAM, which is the NOREG clock-to-out, and runs
+from there through the branch fold in decode into the program counter. The
+cells build's path does not touch a memory read at all: it is the load and
+store unit's atomic sequence, which was already the slowest structure in
+the core alone, passing through the memory's write data on its way. The
+memory has stopped being the binding structure, which is what the probe
+said it would do.
+
+The cell count halves for a reason worth knowing. Both builds are eight
+byte-wide arrays of 4,096 words, which is two cells each at nine bits
+wide, so sixteen cells of array either way. The inferred one is read from
+two addresses, fetch and load, and an inferred memory with two read ports
+is duplicated: thirty-two. The cells have a second read port of their own,
+so fetch reads port B of the same cells and nothing is duplicated. Fewer
+LUT4 as well, since the byte mask is a write enable per cell rather than
+logic in front of one.
+
 ### What is left
 
-The front end can now afford a two-cycle instruction memory, so the next step
-is to ask for the block RAM's register: a memory component that instantiates
-the DP16KD with its output register for the tightly coupled memory and the
-cache arrays, with a simulation model beside it that a test checks against
-the vendor cell model. The data side then needs the same treatment the
-instruction side just had, one outstanding load at a time being what the
-table above still shows. After that, the nine stage shape: the bypass split
-across two stages and the 64-bit add given one of its own.
+The data side needs the same treatment the instruction side had, one
+outstanding load at a time being what the two-cycle table still shows, and
+the cache arrays can be built from the same cells. After that, the nine
+stage shape: the bypass split across two stages and the 64-bit add given
+one of its own.
 
 ## M5 Stallable memory — done
 

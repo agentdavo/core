@@ -19,6 +19,25 @@ object GenerateAxiomSoc extends App {
   println("Wrote generated/AxiomSoc.v")
 }
 
+/** The system with its memory as the block RAM cells the part has, output
+  * registers on, so the memory answers in two cycles and is no longer the
+  * slowest structure on the part. This is the target that measures what the
+  * register is worth at the system level; the core alone has no memory in it.
+  */
+object GenerateAxiomSocEbr extends App {
+  AxiomSpinalConfig().generateVerilog(
+    new AxiomSoc(tcmTwoCycle = true, ebrNative = true, withDebugRegFilePort = false)
+      .setDefinitionName("AxiomSocEbr"))
+  println("Wrote generated/AxiomSocEbr.v")
+}
+
+/** The same system with the memory inferred, for the comparison. */
+object GenerateAxiomSocInferred extends App {
+  AxiomSpinalConfig().generateVerilog(
+    new AxiomSoc(withDebugRegFilePort = false).setDefinitionName("AxiomSocInferred"))
+  println("Wrote generated/AxiomSocInferred.v")
+}
+
 /** The core on its own, buses exposed. The right thing to synthesise when the
   * question is about the core rather than about its memory.
   */
