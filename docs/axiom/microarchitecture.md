@@ -237,7 +237,8 @@ synthesis measures.
 On the data port at most one command is outstanding, which is what lets its
 response buffer be one entry deep. That is arranged by construction rather than
 by counting: the memory stage offers its command only on a cycle where the
-transaction holding it can move on.
+transaction holding it can move on. Two were tried and did not pay; the
+roadmap says why.
 
 The instruction port keeps several commands out, because a memory that answers
 in two cycles would otherwise halve the instruction rate. The program counter

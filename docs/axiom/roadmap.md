@@ -592,13 +592,71 @@ so fetch reads port B of the same cells and nothing is duplicated. Fewer
 LUT4 as well, since the byte mask is a write enable per cell rather than
 logic in front of one.
 
+### Two reads at once, built, measured and taken out again
+
+The obvious next step after the front end was the same thing on the data
+side, and it is written down here because it was built, it worked, and it
+did not pay.
+
+The change was the one the instruction side wanted: the one-deep response
+buffer became a queue of two, a counter of answers owed replaced the single
+outstanding bit, and a command waited for room for its answer rather than
+for the last answer to arrive. Atomics stayed serialised, since an atomic
+takes its answer in the memory stage rather than in writeback and a queue
+in issue order cannot hand one out of turn. Every test passed.
+
+It bought cycles on two workloads of eight, and only against a two-cycle
+memory:
+
+| Workload | One read out | Two reads out |
+| --- | --- | --- |
+| dot-product | 434 | 402 |
+| indexed-chain | 261 | 229 |
+| memcpy | 533 | 533 |
+| indexed-copy | 404 | 404 |
+| sum-of-squares | 241 | 241 |
+
+And it cost seven per cent of the clock. Four seeds each, every one of them
+down: 46.4, 43.4, 46.7, 45.2 becomes 40.7, 41.4, 43.3, 42.9, a mean of 45.4
+against 42.1, for 656 fewer LUT4 and 66 more flip-flops. The load and store
+unit is on none of the four critical paths, which all run from the fetch
+queue through the branch fold into the counter and back. So the cost is not
+a structure that can be fixed by rewriting one, it is the same thing every
+other measurement in this section has run into: a design that is four
+fifths routing gets slower when its shape changes, whichever way the shape
+changes.
+
+Multiply it out and there is nothing left. Dot-product goes from 434 cycles
+at 45.4 MHz to 402 at 42.1, which is 9.56 µs against 9.55. The workloads it
+did not help get seven per cent slower in wall clock for nothing. So it came
+out again.
+
+**The rows that did not move are the more useful result.** The perf counters
+put memcpy's whole sixty-nine extra cycles on writeback waiting for load
+data, sixty-five of them, one per iteration of sixty-four. A second load
+issuing early does nothing for that, because the instruction behind the load
+is a store that wants the value the load is waiting for. Sum-of-squares has
+a multiply consuming the load, indexed-copy a store. The dependency is real
+and the memory is not what is in the way.
+
+What is in the way is that the command goes out from the memory stage and
+the answer is taken in writeback, one cycle apart, while the memory answers
+in two. A third response slot was built on the chance that the queue was
+the limit, and every workload counted exactly what it counted with two,
+which is what the reasoning said and the reason to run it anyway. The fix
+is a stage, not a queue. Two reads at once is worth having again when the
+memory access has the two stages it takes, because then it is what makes
+back-to-back loads work at all rather than a way of starting one load
+slightly early.
+
 ### What is left
 
-The data side needs the same treatment the instruction side had, one
-outstanding load at a time being what the two-cycle table still shows, and
-the cache arrays can be built from the same cells. After that, the nine
-stage shape: the bypass split across two stages and the 64-bit add given
-one of its own.
+The nine stage shape, which is now what every remaining cost points at: the
+memory access given the two stages it takes, with two reads in flight
+restored on top of it, the bypass split across two stages, and the 64-bit
+add given one of its own. The cache arrays can be built from the same cells
+the tightly coupled memory now uses, which is smaller and independent of all
+of that.
 
 ## M5 Stallable memory — done
 
