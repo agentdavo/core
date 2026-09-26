@@ -379,24 +379,53 @@ class LsuPlugin extends AxiomPlugin {
         val operand = extend(node(Global.RS_M), signed = true)
         val compare = extend(node(Global.RS_D), signed = true)
 
+        // The operation starts from the old value's register rather than from
+        // the lane shift in front of it. With both in one cycle this was the
+        // critical path of the core on a seed where nothing else was longer.
+        val held = RegNext(old)
+
         val newValue = Bits(xlen bits)
         newValue := operand
         switch(fn) {
           is(Isa.AtomicFn.SWP)  { newValue := operand }
-          is(Isa.AtomicFn.ADD)  { newValue := (old.asUInt + operand.asUInt).asBits }
-          is(Isa.AtomicFn.AND)  { newValue := old & operand }
-          is(Isa.AtomicFn.OR)   { newValue := old | operand }
-          is(Isa.AtomicFn.XOR)  { newValue := old ^ operand }
+          is(Isa.AtomicFn.ADD)  { newValue := (held.asUInt + operand.asUInt).asBits }
+          is(Isa.AtomicFn.AND)  { newValue := held & operand }
+          is(Isa.AtomicFn.OR)   { newValue := held | operand }
+          is(Isa.AtomicFn.XOR)  { newValue := held ^ operand }
           is(Isa.AtomicFn.CAS)  { newValue := operand }
-          is(Isa.AtomicFn.MIN)  { newValue := Mux(old.asSInt < operand.asSInt, old, operand) }
-          is(Isa.AtomicFn.MAX)  { newValue := Mux(old.asSInt > operand.asSInt, old, operand) }
-          is(Isa.AtomicFn.MINU) { newValue := Mux(old.asUInt < operand.asUInt, old, operand) }
-          is(Isa.AtomicFn.MAXU) { newValue := Mux(old.asUInt > operand.asUInt, old, operand) }
+          is(Isa.AtomicFn.MIN)  { newValue := Mux(held.asSInt < operand.asSInt, held, operand) }
+          is(Isa.AtomicFn.MAX)  { newValue := Mux(held.asSInt > operand.asSInt, held, operand) }
+          is(Isa.AtomicFn.MINU) { newValue := Mux(held.asUInt < operand.asUInt, held, operand) }
+          is(Isa.AtomicFn.MAXU) { newValue := Mux(held.asUInt > operand.asUInt, held, operand) }
         }
-        val commits = fn =/= Isa.AtomicFn.CAS || compare === old
+        val commits = fn =/= Isa.AtomicFn.CAS || compare === held
       }
 
       node(ATOMIC_OLD) := atomic.old
+
+      /** The value an atomic writes, three cycles after the one it read.
+        *
+        * Written the cycle after the read arrived, the old value went through
+        * a lane shift, an extend, an add or a sixty-four bit compare, and a
+        * second lane shift, straight into the memory's write port. Built on
+        * the block RAM with its output register, that was the critical path
+        * of the system on every seed: 25.7 ns, most of it in this area. Here
+        * the lane shift, the arithmetic and the write each get a cycle, and
+        * the write goes out from a register. An atomic is a read, a wait and
+        * a write already; three more cycles are nothing next to what an
+        * atomic is for, and no workload the core is measured on uses one.
+        */
+      val atomicWrite = new Area {
+        val value = RegNext(atomic.newValue)
+        val commits = RegNext(atomic.commits) init False
+        // Settled from three cycles after the read arrived: the old value
+        // lands in its register, the extracted old value in the next, and the
+        // new value in this one.
+        val computing = Delay(atomicRead.arrived, 2, init = False)
+        val settled = Reg(Bool()) init False
+        settled := (settled || computing) && node.isValid && !node.down.isMoving
+      }
+      node.haltWhen(active && kind.isAtomic && beat && !atomicWrite.settled)
 
       /** The store data that was not ready when the store went past.
         *
@@ -451,7 +480,7 @@ class LsuPlugin extends AxiomPlugin {
       val storeData = Bits(xlen bits)
       storeData := late.value
       when(kind.isStorePair && beat) { storeData := node(Global.RS_M) }
-      when(kind.isAtomic) { storeData := atomic.newValue }
+      when(kind.isAtomic) { storeData := atomicWrite.value }
 
       // The data shifts by a bit offset and the mask by a byte offset. Using
       // one for both silently drops every store whose lane is past the first.
@@ -468,11 +497,14 @@ class LsuPlugin extends AxiomPlugin {
       // on its second pass. Under a fixed-latency bus that was a read nobody
       // looked at; here it would be a response nobody takes, and the buffer
       // would still be holding it when the next load wanted the buffer.
-      val compareFailed = kind.isAtomic && beat && !atomic.commits
-      val wantsCommand = active && !compareFailed
+      val compareFailed = kind.isAtomic && beat && !atomicWrite.commits
+      // Until the new value has settled the write has nothing right to carry,
+      // and the stage is held for it above.
+      val atomicSettling = kind.isAtomic && beat && !atomicWrite.settled
+      val wantsCommand = active && !compareFailed && !atomicSettling
 
       bus.enable := wantsCommand && !issued && !stillOwed && !bufferBusy && !late.waiting
-      bus.write := kind.isStore || (kind.isAtomic && beat && atomic.commits)
+      bus.write := kind.isStore || (kind.isAtomic && beat && atomicWrite.commits)
       bus.address := address.resized
       bus.wdata := (storeData.asUInt << bitShift).resize(xlen).asBits
       bus.mask := (laneMask << addressLow).resize(8).asBits

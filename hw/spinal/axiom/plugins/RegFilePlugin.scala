@@ -199,6 +199,16 @@ class RegFilePlugin extends AxiomPlugin with RegFileService {
       * this leaves out.
       */
     val result = new Area {
+      /** The stage's own result, or the one it carried in.
+        *
+        * A chain of multiplexers in registration order. One producer is
+        * selected at a time, so an AND-OR of each source against its own
+        * select would say the same thing, and it was tried: synthesis
+        * collapsed it into each of the forwarding multiplexers it feeds and
+        * built it again for every read port, five thousand cells for a clock
+        * that went down rather than up. The chain maps onto the slice's own
+        * wide multiplexers and stays one copy.
+        */
       def choose(node: CtrlLink, at: Int, carried: Bits): Bits = {
         val value = Bits(xlen bits)
         value := carried

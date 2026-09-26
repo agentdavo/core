@@ -91,38 +91,44 @@ class PcPlugin extends AxiomPlugin with PcService {
     // and younger than the redirecting one needs an explicit throw, because it
     // was fetched before the redirect and still carries the current
     // generation. Everything still in flight behind them is caught by the
-    // generation compare as it arrives at decode.
+    // generation compare below.
     //
     // A redirect only throws the stages in front of its own, which is what
-    // lets an unconditional branch resolve in decode without discarding
-    // itself.
+    // lets a branch resolve without discarding itself.
     for (stage <- Stages.DECODE until Stages.WRITEBACK) {
       val younger = ordered.filter(_.from > stage).map(_.port.valid)
       if (younger.nonEmpty) ctrl(stage).throwWhen(younger.reduce(_ || _))
     }
 
-    val decodeNode = ctrl(Stages.DECODE)
-
-    /** The instruction that asked for a redirect is not part of the shadow it
-      * created.
+    /** The generation compare, wherever a stale instruction can arrive
+      * without having passed through a stage that was thrown.
       *
-      * A branch folded in decode redirects as soon as it knows where it is
-      * going, which may be several cycles before it is allowed to leave the
-      * stage. From the next cycle its own fetch generation is one behind, and
-      * the compare below would throw it: the branch would vanish, taking a
-      * link register write with it, and the retired instruction stream would
-      * be missing the instruction that caused the jump.
+      * Decode is the obvious place: everything fetched arrives there. Read is
+      * the other, because the skid buffer between the two is not a stage and
+      * cannot be thrown. A branch that redirects from read may have the
+      * instruction behind it parked in that buffer, already past decode's
+      * compare, and it is caught here on the way in.
       *
-      * So a redirect from decode exempts whatever is in decode until it
-      * leaves, whichever way it leaves. Nothing else is exempted: the
-      * instruction that arrives after it was fetched before the redirect and
-      * is exactly what the compare is for.
+      * The instruction that asked for a redirect is not part of the shadow it
+      * created. A branch redirects as soon as it knows where it is going,
+      * which may be several cycles before it is allowed to leave its stage.
+      * From the next cycle its own generation is one behind, and the compare
+      * would throw it: the branch would vanish, taking a link register write
+      * with it, and the retired stream would be missing the instruction that
+      * caused the jump. So a redirect from a stage exempts whatever is in that
+      * stage until it leaves, whichever way it leaves. Nothing else is
+      * exempted: the instruction that arrives after it was fetched before the
+      * redirect and is exactly what the compare is for.
       */
-    val exempt = Reg(Bool()) init False
-    val fromDecode = ordered.filter(_.from == Stages.DECODE).map(_.port.valid)
-    if (fromDecode.nonEmpty) when(fromDecode.reduce(_ || _)) { exempt := True }
-    when(decodeNode.up.isMoving) { exempt := False }
-
-    decodeNode.throwWhen(decodeNode.up(Global.FETCH_GEN) =/= gen && !exempt)
+    val generationChecks = Seq(Stages.DECODE, Stages.READ).map { stage =>
+      new Area {
+        val node = ctrl(stage)
+        val exempt = Reg(Bool()) init False
+        val fromHere = ordered.filter(_.from == stage).map(_.port.valid)
+        if (fromHere.nonEmpty) when(fromHere.reduce(_ || _)) { exempt := True }
+        when(node.up.isMoving) { exempt := False }
+        node.throwWhen(node.up(Global.FETCH_GEN) =/= gen && !exempt)
+      }.setName(s"generation_${stage}")
+    }
   }
 }

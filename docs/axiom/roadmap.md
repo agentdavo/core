@@ -649,14 +649,104 @@ memory access has the two stages it takes, because then it is what makes
 back-to-back loads work at all rather than a way of starting one load
 slightly early.
 
+### Balancing before adding
+
+The nine stage table above says where each piece of work should end up. What
+the critical path reports said, once they were read four seeds at a time, is
+that the first job was not new stages but the stages already there: several
+of them did two things in one cycle that the next stage had room for. Five
+steps, each one aimed at the path the previous step's report named, and each
+measured on four seeds:
+
+| Step | Seed 2 | Seed 3 | Seed 4 | Seed 5 | Mean | LUT4 |
+| --- | --- | --- | --- | --- | --- | --- |
+| before | 46.4 | 43.4 | 46.7 | 45.2 | 45.4 | 14,117 |
+| branch fold split across decode and read | 44.7 | 45.1 | 45.8 | 46.0 | 45.4 | 14,009 |
+| multiply rows summed in execute | 52.3 | 49.3 | 51.0 | — | 50.9 | 14,688 |
+| compares finished in memory | 48.9 | 54.8 | 48.7 | 50.3 | 50.7 | 15,298 |
+| multiply sign decoded, atomic split again | 52.6 | 51.3 | 52.6 | 52.5 | 52.3 | 15,323 |
+
+Fifteen per cent, and the spread across seeds went from 3.3 MHz to 1.3,
+which is the other thing balancing buys: the placement lottery matters less
+when no one path is much longer than the rest. On a one-cycle memory every
+workload counts within three cycles of what it counted before.
+
+**The branch fold** was the path on every seed at the start: the word off
+the fetch queue, the offset decoded out of it, a sixty-four bit add, a
+sixty-four bit compare against where the front end went, and the program
+counter and the fetch queues' flush behind that, all in one cycle, and a
+loop, since the counter it redirected is what fetched the word. Decode now
+does the add and read does the compare and the redirect. A branch the front
+end has not seen before costs one cycle more; one it has is predicted at
+fetch and never redirects here, which is why the workloads moved by one to
+three cycles.
+
+Moving a redirect out of decode needed one thing the old one did not. The
+skid buffer between decode and read is not a stage and cannot be thrown, so
+a wrong-path instruction parked in it would survive a redirect from read.
+The program counter now runs its generation compare at read as well as at
+decode, with the same exemption for the instruction that asked.
+
+The step did not move the mean, and that is its result rather than its
+failure: with the loop gone, all four seeds agreed on a single path that
+the loop had been hiding.
+
+**The multiply** was summed as sixteen products, each widened to a hundred
+and twenty-eight bits, in four adder levels, all in the memory stage, and
+forwarded to read in the same cycle. Execute held only the multiplier cells.
+Each row of four products is now summed in execute at eighty-four bits,
+which is as wide as a row can be, and memory adds the four rows. No cycle
+moved, since the result is ready in the same stage it was.
+
+**The compares**: set-if-less-than, MIN and MAX all depend on the end of the
+carry chain, and in execute that put the chain, the signed or unsigned
+select and a sixty-four bit multiplexer in front of the result every
+instruction produces. Moving only MIN and MAX would not have done it, since
+set-if-less-than puts the compare into bit 0. All three now finish in
+memory from a registered compare, like a shift. None of the workloads uses
+any of them.
+
+**The last step** fixed the two paths the compares step exposed: the
+multiply's signedness was a compare of the function field in execute, in
+front of the multiplier cells, and is now decoded once and carried; and the
+atomic's lane shift and its arithmetic, already split from the write, are
+split from each other too. An atomic is now three cycles longer than it was
+at the start of this section, which no workload measures and nothing that
+uses an atomic would notice.
+
+**A refusal.** Each stage chooses its result from its producers with a chain
+of multiplexers, one level per producer. One producer is selected at a
+time, so a flat AND-OR says the same thing in two levels, and it was built:
+5,121 more cells and a mean of 49.7 MHz against 50.9. Synthesis collapsed
+the flat logic into every forwarding multiplexer it feeds and built it
+again for each read port; the chain maps onto the slice's own wide
+multiplexers and stays one copy. The chain stays, and says why in a comment.
+
+On the system with the block RAM, which is what gets built:
+
+| | Seed 2 | Seed 3 | Seed 4 | Seed 5 | Mean |
+| --- | --- | --- | --- | --- | --- |
+| before | 40.1 | 38.6 | 39.0 | 41.4 | 39.8 |
+| after the five steps | 51.4 | 48.0 | 45.8 | 49.0 | 48.6 |
+
+Twenty-two per cent, for 15,762 LUT4 against 13,581, sixteen per cent more
+area. It is more than the core alone gained, because the system's
+own worst path at the start was the atomic's read-modify-write feeding the
+block RAM's write port, and taking that apart was part of the last step. Its
+four seeds now end in four different places: the block RAM's word through
+the bank select into decode, the indirect branch target into the fetch
+queues, the stall network, and the predicate compare.
+
 ### What is left
 
-The nine stage shape, which is now what every remaining cost points at: the
-memory access given the two stages it takes, with two reads in flight
-restored on top of it, the bypass split across two stages, and the 64-bit
-add given one of its own. The cache arrays can be built from the same cells
-the tightly coupled memory now uses, which is smaller and independent of all
-of that.
+The critical path reports now split three ways on four seeds, which is what
+balance looks like: the multiply's issue side on three, where most of the
+time is wire to and from the multiplier cells in their fixed column, and the
+predicate compare in execute on the fourth, which still decodes its
+condition out of the instruction there. Past those, the paths that remain
+are the ones the nine stage table was written for: the memory access given
+the two stages it takes, with two reads in flight restored on top, the
+forward into read split, and the 64-bit add given a stage of its own.
 
 ## M5 Stallable memory — done
 

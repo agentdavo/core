@@ -190,9 +190,9 @@ auto-increment addressing.
 
 "If its value exists yet" is the whole of the interlock. Every producer
 declares the stage in which its result actually appears — execute for
-arithmetic, memory for an atomic's old value, writeback for a load or a
-multiply — and the forwarding multiplexer for a stage only offers the sources
-that have arrived by then. Anything it leaves out holds the read stage instead.
+arithmetic, memory for a shift, a multiply or a compare into a register,
+writeback for a load or an atomic's old value — and the forwarding
+multiplexer for a stage only offers the sources that have arrived by then. Anything it leaves out holds the read stage instead.
 One flag drives both, so a new functional unit cannot forward a value that does
 not exist and cannot silently skip the stall that replaces it.
 
@@ -209,17 +209,22 @@ forwarded operands, so it may immediately follow the compare that set its
 predicate. Taken, it kills the three instructions behind it.
 
 An unconditional relative branch does not wait for execute. Its target is the
-program counter plus a displacement and both are known in decode, so it
-redirects from there and kills one instruction instead of three. Calls and
-unconditional jumps dominate the taken branches in ordinary code, and folding
-them in decode recovered almost all of the cycles the separate read stage cost:
-on the demo program, 275 cycles became 235, against 233 for the five-stage
-core, while the clock went up by a fifth.
+program counter plus a displacement, both known in decode, so decode adds them
+and the read stage compares the result against where the front end went and
+redirects if they differ. That is one cycle later than folding in decode and
+still well ahead of execute, and a branch the front end has already seen costs
+nothing at all, since it was predicted at fetch. The add and the compare were once both in decode, with the
+redirect behind them; that loop from the program counter back to itself was
+the critical path of the core until it was split.
 
 Neither branch plugin counts stages. Each redirect port is registered with the
 stage it comes from; the program counter plugin throws the stages in front of
 it and bumps a generation counter, and each fetched instruction carries the
-generation it was fetched under so decode discards anything stale. A redirect
+generation it was fetched under so decode discards anything stale. Read
+checks the generation too, because the skid buffer between decode and read is
+not a stage and cannot be thrown, and a wrong-path instruction parked in it
+would otherwise outlive a redirect from read. Whatever stage asked for a
+redirect is exempt from its own compare until it leaves. A redirect
 from a deeper stage wins over one from a shallower stage in the same cycle,
 because the deeper instruction is the older one. Adding a stage costs nothing
 anywhere else, which is exactly what adding the read stage demonstrated.

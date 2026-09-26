@@ -53,6 +53,18 @@ class BranchPlugin extends AxiomPlugin with PredictorService {
   /** What decode guessed about this instruction, carried down with it. */
   val PREDICTED = Payload(Bool())
 
+  /** The fold, worked out in decode and acted on in read.
+    *
+    * Where the instruction really goes as far as decode can tell, and
+    * whether it is a branch the front end should learn. Decode does the add
+    * and read does the compare and the redirect, so that neither the adder
+    * nor the compare is in the same cycle as the program counter they feed,
+    * and the two are not in the same cycle as each other.
+    */
+  val FOLD_TARGET = Payload(UInt(AxiomParam.PC_WIDTH bits))
+  val FOLDING = Payload(Bool())
+  val FOLD_RELATIVE = Payload(Bool())
+
   private var redirect: Flow[UInt] = null
   private var earlyRedirect: Flow[UInt] = null
 
@@ -61,7 +73,7 @@ class BranchPlugin extends AxiomPlugin with PredictorService {
     // BL and JALR write a return address; B and BP write nothing, and the
     // decoder already knows which is which.
     host[RegFileService].addResult(SEL, RESULT)
-    earlyRedirect = host[PcService].newRedirect(Stages.DECODE)
+    earlyRedirect = host[PcService].newRedirect(Stages.READ)
     redirect = host[PcService].newRedirect(Stages.EXECUTE)
   }
 
@@ -132,7 +144,18 @@ class BranchPlugin extends AxiomPlugin with PredictorService {
       Mux(history.jumps(pc), history.target(pc), pc + 4)
     }
 
-    // ---- the unconditional relative branch, folded in decode -------------
+    // ---- the unconditional relative branch, folded -----------------------
+    //
+    // Decode works out where the instruction goes and read acts on it.
+    //
+    // Doing both in decode was the critical path of the core on every seed
+    // measured: the word off the fetch queue, the offset decoded out of it, a
+    // sixty-four bit add, a sixty-four bit compare against where the front
+    // end went, and the program counter and the fetch queues' flush behind
+    // that, all in one cycle, and a loop, because the counter it redirected
+    // is what fetched the word. Splitting it at the stage boundary costs one
+    // cycle on a branch the front end has not seen before and nothing on one
+    // it has, since those are predicted and never redirect here at all.
     val early = new Area {
       val node = ctrl(Stages.DECODE)
       val opcode = node(Global.INSTRUCTION)(Isa.OP_HI downto Isa.OP_LO)
@@ -159,72 +182,74 @@ class BranchPlugin extends AxiomPlugin with PredictorService {
       // rather than against the front end's state, which has moved on.
       node(PREDICTED) := node(SEL) && predictTaken
 
-      // Once per branch, and not on the cycle it happens to leave.
-      //
-      // A redirect must happen exactly once for a given branch, or the fetch
-      // generation moves twice and the second move discards the target fetch
-      // the first one asked for. The obvious way to say "once" is to fire on
-      // the cycle the branch leaves the stage, and that is what this did.
-      //
-      // Leaving is the wrong event to wait for. Whether a stage may move is
-      // the whole arbitration network: every halt in every stage below,
-      // including a load/store unit waiting on memory. Measured on an ECP5
-      // that chain, from a stall in the memory stage back through the ready
-      // network and into the program counter, was the critical path of the
-      // core in every seed. And waiting on it is not only slow to elaborate:
-      // it delays the target fetch until the stall clears, when the front end
-      // could have been fetching it all along.
-      //
-      // A register saying this branch has already redirected says "once"
-      // without asking anything about readiness. Validity and the generation
-      // compare are all that is left, and both are close by.
-      /** This transaction has redirected already.
-        *
-        * Held while the same transaction is still in the stage and dropped the
-        * moment it leaves or the stage empties. Clearing it only on departure
-        * is not enough: a stage left holding a bubble never departs, so the
-        * flag would still be set when the next real instruction arrived and
-        * that one's redirect would be swallowed.
-        */
-      val fired = Reg(Bool()) init False
-
       /** Where this instruction really goes, as far as decode can tell.
         *
         * An indirect jump is the exception: its target is a register and does
-        * not exist yet, so decode calls it not taken and execute corrects it,
-        * which is what it did before any of this.
+        * not exist yet, so decode calls it not taken and execute corrects it.
         */
       val folding = node(SEL) && (isRelative || predictTaken)
       val target = node(Global.PC) + node(Global.BRANCH_OFF)
       val wanted = Mux(folding, target, node(Global.PC) + 4)
 
+      // Worked out here from whatever word decode holds, and only ever read
+      // by read, which sees nothing decode did not let go: a stale word in a
+      // stalled decode never gets that far.
+      //
+      // The compare against where the front end went is read's. Here it came
+      // after the block RAM's word, the bank and half selects, the decoder
+      // and the add, and was the critical path of the system built on the
+      // block RAM.
+      node(FOLD_TARGET) := wanted
+      node(FOLDING) := folding
+      node(FOLD_RELATIVE) := isRelative
+    }
+
+    val fold = new Area {
+      val node = ctrl(Stages.READ)
+
+      /** This transaction has redirected already.
+        *
+        * A redirect must happen exactly once for a given branch, or the fetch
+        * generation moves twice and the second move discards the target fetch
+        * the first one asked for. Firing on the cycle the branch leaves would
+        * say "once", and would put the whole arbitration network in front of
+        * the program counter: measured, that was the critical path of the core
+        * in every seed. A register saying this branch has already redirected
+        * says "once" without asking anything about readiness.
+        *
+        * Held while the same transaction is in the stage and dropped the
+        * moment it leaves or the stage empties, so a bubble left behind never
+        * swallows the next real instruction's redirect.
+        */
+      val fired = Reg(Bool()) init False
+
+      // The generation compare is what keeps a wrong-path instruction from
+      // redirecting: one parked in the skid buffer behind a branch that fired
+      // from here arrives with the old generation, and the program counter
+      // throws it on arrival. It must not act first.
+      val current = host[PcService].generationOk(node.up)
+
       // Redirect when the front end went somewhere else, rather than whenever
       // this is a taken branch. The two are the same thing for a branch the
       // front end has not seen before, and not the same for one it has: that
-      // one was already folded a stage earlier and costs nothing here. It is
-      // also what catches a prediction made from an entry belonging to some
-      // other address, without the table needing a tag to prevent it.
-      //
-      // Validity is not enough on its own. Decode's instruction payload comes
-      // straight off the fetch unit's buffer, so a stalled decode with an
-      // empty buffer is holding a valid transaction and the previous
-      // instruction's bits. Acting on those was worth twenty times the cycles
-      // behind a cache: every branch decoded from a stale word threw away the
-      // fetch in progress, and the front end never got a line in.
-      val mispredicted = node(Global.PREDICTED_NEXT) =/= wanted
-      val redirecting = node.up.isValid && host[FetchService].instructionPresent &&
-        !fired && mispredicted && host[PcService].generationOk(node.up)
+      // one was already folded at fetch and costs nothing. It is also what
+      // catches a prediction made from an entry belonging to some other
+      // address, without the table needing a tag to prevent it.
+      val mispredicted = node(Global.PREDICTED_NEXT) =/= node(FOLD_TARGET)
+      val redirecting = node.up.isValid && !fired && mispredicted && current
       fired := (fired || redirecting) && node.up.isValid && !node.up.isMoving
 
       earlyRedirect.valid := redirecting
-      earlyRedirect.payload := wanted
+      earlyRedirect.payload := node(FOLD_TARGET)
 
-      // Teach the front end the branches decode has folded. Only the ones it
-      // can fold: an indirect jump has no target to remember, and a branch
-      // predicted not taken is one the front end is already right about.
-      when(node.up.isValid && host[FetchService].instructionPresent && folding &&
-        host[PcService].generationOk(node.up)) {
-        history.remember(node(Global.PC), target, isRelative)
+      // Teach the front end the branches that were folded. Only those: an
+      // indirect jump has no target to remember, and a branch predicted not
+      // taken is one the front end is already right about. The target of a
+      // relative branch is a fact about its address, so learning it from an
+      // instruction that is about to be thrown is still learning something
+      // true.
+      when(node.up.isValid && node(FOLDING) && current) {
+        history.remember(node(Global.PC), node(FOLD_TARGET), node(FOLD_RELATIVE))
       }
     }
 
