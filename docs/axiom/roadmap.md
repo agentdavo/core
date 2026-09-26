@@ -745,15 +745,27 @@ code is one of four shapes, so decode now hands execute five bits: which
 operand, test equality, test ordering, unsigned, invert. Every seed went up,
 and the core got 332 LUT4 smaller.
 
+**A second refusal.** All four seeds then ended in the multiply's issue
+side, and seven of its eighteen and a half nanoseconds were wire, out to the
+multiplier cells in their fixed column and back. The obvious reading was
+that the operand registers sat among the other execute units, far from the
+column, so the multiplier was given its own copy of both operands. Synthesis
+merged the copies straight back into the originals, since they had the same
+input; gated with the multiply's select they survived, as 128 flip-flops and
+359 LUT4. The mean went from 53.8 to 53.0 MHz and the wire to the cells was
+3.3 to 3.8 ns, as before. The reading was wrong: each limb of an operand
+feeds four cells spread down the column, and no one position for its
+register is near all four. The wire is the fanout, not the distance.
+
 ### What is left
 
-All four seeds now end in the multiply's issue side, and seven of its
-eighteen and a half nanoseconds are wire: from the operand registers, which
-sit among the units that read them, out to the multiplier cells in their
-fixed column, and back. Past that, the paths the nine stage table was
-written for: the memory access given the two stages it takes, with two reads
-in flight restored on top, the forward into read split, and the 64-bit add
-given a stage of its own.
+The multiply's issue side, whose wire is the fanout of each operand limb to
+four multiplier cells. The part has an adder inside each DSP slice that
+could sum products without leaving the column, which yosys does not map and
+would have to be instantiated, as the block RAM was. Past that, the paths
+the nine stage table was written for: the memory access given the two
+stages it takes, with two reads in flight restored on top, the forward into
+read split, and the 64-bit add given a stage of its own.
 
 ## M5 Stallable memory — done
 
