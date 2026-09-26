@@ -15,6 +15,21 @@ class CmpPlugin extends AxiomPlugin {
   val SEL   = Payload(Bool())
   val VALUE = Payload(Bool())
 
+  /** The compare, decoded into what execute has to do with it.
+    *
+    * Execute decoded the operand select and the condition code out of the
+    * instruction itself, in front of the comparison, which put the opcode
+    * compare and a ten-way switch on a path that was already a sixty-four bit
+    * carry chain. It is decoded once instead: which operand, whether to test
+    * equality, ordering or both, whether ordering is unsigned, and whether the
+    * answer is inverted. Every condition code is one of those shapes.
+    */
+  val USE_IMM = Payload(Bool())
+  val TEST_EQ = Payload(Bool())
+  val TEST_LT = Payload(Bool())
+  val UNSIGNED = Payload(Bool())
+  val INVERT = Payload(Bool())
+
   /** The condition code sits at different bit positions in the register and
     * immediate forms, because the immediate needs the low twelve bits.
     */
@@ -34,31 +49,27 @@ class CmpPlugin extends AxiomPlugin {
   }
 
   val logic = during build new Area {
-    val node = ctrl(Stages.EXECUTE)
-    val instr = node(Global.INSTRUCTION)
+    val decode = new Area {
+      val node = ctrl(Stages.DECODE)
+      val instr = node(Global.INSTRUCTION)
+      val cc = conditionOf(instr).asUInt
+      def ccIs(values: Int*): Bool = values.map(v => cc === v).reduce(_ || _)
 
-    val isImmediate = instr(Isa.OP_HI downto Isa.OP_LO) === B(Isa.CMP_I, 6 bits)
-    val a = node(Global.RS_N)
-    val b = Mux(isImmediate, node(Global.IMM), node(Global.RS_M))
-
-    val equal        = a === b
-    val lessSigned   = a.asSInt < b.asSInt
-    val lessUnsigned = a.asUInt < b.asUInt
-
-    val value = Bool()
-    value := False
-    switch(conditionOf(instr).asUInt) {
-      is(Isa.Cc.EQ)  { value := equal }
-      is(Isa.Cc.NE)  { value := !equal }
-      is(Isa.Cc.LT)  { value := lessSigned }
-      is(Isa.Cc.GE)  { value := !lessSigned }
-      is(Isa.Cc.LTU) { value := lessUnsigned }
-      is(Isa.Cc.GEU) { value := !lessUnsigned }
-      is(Isa.Cc.LE)  { value := lessSigned || equal }
-      is(Isa.Cc.GT)  { value := !(lessSigned || equal) }
-      is(Isa.Cc.LEU) { value := lessUnsigned || equal }
-      is(Isa.Cc.GTU) { value := !(lessUnsigned || equal) }
+      node(USE_IMM) := instr(Isa.OP_HI downto Isa.OP_LO) === B(Isa.CMP_I, 6 bits)
+      node(TEST_EQ) := ccIs(Isa.Cc.EQ, Isa.Cc.NE, Isa.Cc.LE, Isa.Cc.GT, Isa.Cc.LEU, Isa.Cc.GTU)
+      node(TEST_LT) := !ccIs(Isa.Cc.EQ, Isa.Cc.NE)
+      node(UNSIGNED) := ccIs(Isa.Cc.LTU, Isa.Cc.GEU, Isa.Cc.LEU, Isa.Cc.GTU)
+      node(INVERT) := ccIs(Isa.Cc.NE, Isa.Cc.GE, Isa.Cc.GEU, Isa.Cc.GT, Isa.Cc.GTU)
     }
-    node(VALUE) := value
+
+    val node = ctrl(Stages.EXECUTE)
+
+    val a = node(Global.RS_N)
+    val b = Mux(node(USE_IMM), node(Global.IMM), node(Global.RS_M))
+
+    val equal = a === b
+    val less = Mux(node(UNSIGNED), a.asUInt < b.asUInt, a.asSInt < b.asSInt)
+
+    node(VALUE) := node(INVERT) ^ ((node(TEST_EQ) && equal) || (node(TEST_LT) && less))
   }
 }

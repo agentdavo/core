@@ -665,10 +665,11 @@ measured on four seeds:
 | multiply rows summed in execute | 52.3 | 49.3 | 51.0 | — | 50.9 | 14,688 |
 | compares finished in memory | 48.9 | 54.8 | 48.7 | 50.3 | 50.7 | 15,298 |
 | multiply sign decoded, atomic split again | 52.6 | 51.3 | 52.6 | 52.5 | 52.3 | 15,323 |
+| predicate compare decoded in decode | 52.7 | 53.3 | 54.8 | 54.2 | 53.8 | 14,991 |
 
-Fifteen per cent, and the spread across seeds went from 3.3 MHz to 1.3,
-which is the other thing balancing buys: the placement lottery matters less
-when no one path is much longer than the rest. On a one-cycle memory every
+Eighteen per cent by the end, and the spread across seeds went from 3.3 MHz
+to 2.1, which is the other thing balancing buys: the placement lottery
+matters less when no one path is much longer than the rest. On a one-cycle memory every
 workload counts within three cycles of what it counted before.
 
 **The branch fold** was the path on every seed at the start: the word off
@@ -737,16 +738,22 @@ four seeds now end in four different places: the block RAM's word through
 the bank select into decode, the indirect branch target into the fetch
 queues, the stall network, and the predicate compare.
 
+**The predicate compare** decoded its operand select and its condition code
+out of the instruction in execute, which put an opcode compare and a ten-way
+switch around a comparison that was already a carry chain. Every condition
+code is one of four shapes, so decode now hands execute five bits: which
+operand, test equality, test ordering, unsigned, invert. Every seed went up,
+and the core got 332 LUT4 smaller.
+
 ### What is left
 
-The critical path reports now split three ways on four seeds, which is what
-balance looks like: the multiply's issue side on three, where most of the
-time is wire to and from the multiplier cells in their fixed column, and the
-predicate compare in execute on the fourth, which still decodes its
-condition out of the instruction there. Past those, the paths that remain
-are the ones the nine stage table was written for: the memory access given
-the two stages it takes, with two reads in flight restored on top, the
-forward into read split, and the 64-bit add given a stage of its own.
+All four seeds now end in the multiply's issue side, and seven of its
+eighteen and a half nanoseconds are wire: from the operand registers, which
+sit among the units that read them, out to the multiplier cells in their
+fixed column, and back. Past that, the paths the nine stage table was
+written for: the memory access given the two stages it takes, with two reads
+in flight restored on top, the forward into read split, and the 64-bit add
+given a stage of its own.
 
 ## M5 Stallable memory — done
 
